@@ -12,6 +12,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/cliinstall"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
 	"github.com/KevinXC5/flyshadow-bar/internal/engine"
@@ -58,6 +59,9 @@ type viewModel struct {
 	updateCancel        context.CancelFunc
 	updateResult        *updater.CheckResult
 	updateErr           string
+	cliStatus           cliinstall.Status
+	cliStatusLoaded     bool
+	cliInstalling       bool
 	toastMsg            string
 }
 
@@ -206,8 +210,10 @@ func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 
 	ui.Row(c).Height(h).Padding(0, rightPad, 0, leftPad).AlignItems(ui.Center).Gap(8).
 		DragWindow().Children(func() {
-		ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
-			ui.Box(c).Size(7.5, 7.5).Radius(99).Background(stateDotColor(vm.snap.State, p))
+		ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
+			if logo := appLogoBitmap(); logo != nil {
+				ui.Image(c, logo).Size(20, 20).Fit(ui.Contain)
+			}
 			ui.Text(c, "FlyShadow Bar").FontSize(13).Bold().TextColor(p.text)
 		})
 		ui.Spacer(c)
@@ -696,6 +702,34 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				renderKVRow(c, p, "核心库版本", nonEmpty(snap.CoreVersion, "未知"))
 				renderKVRow(c, p, "核心库路径", nonEmpty(snap.CoreLibPath, "未检测到"))
 				renderKVRow(c, p, "配置文件", nonEmpty(snap.ConfigPath, "未知"))
+
+				ui.Divider(c)
+				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+					cliDesc := "尚未链接到 PATH（安装运行后将自动配置）"
+					cliColor := p.textMuted
+					if vm.cliStatusLoaded && vm.cliStatus.Installed {
+						cliDesc = nonEmpty(vm.cliStatus.Detail, vm.cliStatus.LinkPath)
+						if vm.cliStatus.InPATH {
+							cliColor = p.textSecondary
+						} else {
+							cliColor = p.warning
+						}
+					}
+					ui.Column(c).Grow(1).Gap(2).Children(func() {
+						ui.Text(c, "命令行工具 (fsbar)").FontSize(11).TextColor(p.textMuted)
+						ui.Text(c, cliDesc).FontSize(11.5).TextColor(cliColor).Wrap()
+					})
+					btnLabel := "链接到 PATH"
+					if vm.cliStatusLoaded && vm.cliStatus.Installed {
+						btnLabel = "重新链接"
+					}
+					if ui.Button(c.Key("btn-install-cli"), btnLabel).Disabled(vm.cliInstalling).Padding(5, 11).Radius(7).Clicked() {
+						if vm.app != nil {
+							vm.cliInstalling = true
+							vm.app.installCLILink()
+						}
+					}
+				})
 
 				ui.Divider(c)
 				ui.Column(c).Gap(6).Children(func() {

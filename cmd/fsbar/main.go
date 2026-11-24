@@ -25,6 +25,7 @@ func main() {
 		return
 	}
 
+	attachParentConsole()
 	if err := runCLI(args); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		os.Exit(1)

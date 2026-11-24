@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"bytes"
+	"image/png"
 	"testing"
 
 	"github.com/egoist/mygo"
@@ -109,11 +111,48 @@ func TestMainViewRendersCleanly(t *testing.T) {
 		t.Fatalf("update ready banner missing expected text, got: %v", ttReady.Texts())
 	}
 
+	// 验证标题栏应用 Logo 位图解码有效
+	if logo := appLogoBitmap(); logo == nil {
+		t.Fatalf("appLogoBitmap() returned nil")
+	}
+
 	// 验证图标 PNG 生成有效
 	pngConn := makeTrayIconPNG(true)
 	pngIdle := makeTrayIconPNG(false)
 	if len(pngConn) < 100 || len(pngIdle) < 100 {
 		t.Fatalf("tray icon PNG too small: conn=%d idle=%d", len(pngConn), len(pngIdle))
+	}
+}
+
+// TestDarwinTrayIconIsPureMonochromeTemplate 确保 macOS 菜单栏图标始终为严格纯黑透明模板图
+// （零彩色像素），由系统按浅/深菜单栏自动切换黑白色，避免退化为彩色原生应用图标。
+func TestDarwinTrayIconIsPureMonochromeTemplate(t *testing.T) {
+	for _, connected := range []bool{true, false} {
+		raw := makeTrayIconPNGForOS(connected, "darwin")
+		img, err := png.Decode(bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("decode darwin tray icon (connected=%v): %v", connected, err)
+		}
+		b := img.Bounds()
+		if b.Dx() < 32 || b.Dy() < 32 {
+			t.Fatalf("darwin tray icon too small: %dx%d", b.Dx(), b.Dy())
+		}
+		visiblePixels := 0
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				r, g, bl, a := img.At(x, y).RGBA()
+				if a > 0 {
+					visiblePixels++
+					if r != 0 || g != 0 || bl != 0 {
+						t.Fatalf("darwin tray icon (connected=%v) at (%d,%d) must be monochrome template (RGB=0), got RGBA=(%d,%d,%d,%d)",
+							connected, x, y, r, g, bl, a)
+					}
+				}
+			}
+		}
+		if visiblePixels == 0 {
+			t.Fatalf("darwin tray icon (connected=%v) has no visible pixels", connected)
+		}
 	}
 }
 

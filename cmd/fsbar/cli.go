@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/cliinstall"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/control"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
@@ -71,6 +72,11 @@ func runCLI(args []string) error {
 			return printCommandHelp(os.Stdout, "update")
 		}
 		return cmdUpdate(rest, jsonOut)
+	case "install-cli":
+		if hasHelpFlag(rest) {
+			return printCommandHelp(os.Stdout, "install-cli")
+		}
+		return cmdInstallCLI(rest, jsonOut)
 	}
 
 	// 任意子命令携带 -h / --help 时直接输出该命令详尽帮助，无需连接运行中实例
@@ -409,6 +415,41 @@ func cmdVersion(jsonOut bool) error {
 	return nil
 }
 
+func cmdInstallCLI(args []string, jsonOut bool) error {
+	targetDir := ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--dir" || args[i] == "-d":
+			if i+1 >= len(args) {
+				return errors.New("--dir 缺少目标目录参数（例如: fsbar install-cli --dir ~/.local/bin）")
+			}
+			targetDir = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--dir="):
+			targetDir = strings.TrimPrefix(args[i], "--dir=")
+		default:
+			return fmt.Errorf("未知选项 %q（运行 `fsbar help install-cli` 查看用法）", args[i])
+		}
+	}
+
+	st, err := cliinstall.Ensure(cliinstall.Options{TargetDir: targetDir})
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		return writeIndentedJSON(st)
+	}
+	if st.Changed {
+		fmt.Printf("已将 fsbar 链接至: %s -> %s\n", st.LinkPath, st.TargetPath)
+	} else {
+		fmt.Printf("fsbar 链接已就绪: %s -> %s\n", st.LinkPath, st.TargetPath)
+	}
+	if !st.InPATH && st.LinkPath != "" {
+		fmt.Printf("提示: 请确认目录 %s 已加入系统 PATH 环境变量。\n", filepath.Dir(st.LinkPath))
+	}
+	return nil
+}
+
 func cmdUpdate(args []string, jsonOut bool) error {
 	download := false
 	repoOverride := ""
@@ -586,6 +627,7 @@ CLI 全局选项（可放在任意位置，适用于所有子命令）:
   conns | connections                       查看核心库当前实时活跃连接（协议、目标、路由、进程与流量）
   version                                   输出 fsbar 版本号、Commit 与构建时间（别名: -v / --version）
   update [--download] [--repo <owner/r>]    检查 GitHub Releases 最新版本，加 --download 下载安装包
+  install-cli [--dir <目录>]                将当前 fsbar 链接/注册到系统 PATH 目录（支持自定义目录）
   help [子命令]                             显示总览帮助或单个子命令的完整说明
 
 常用环境变量:
@@ -851,6 +893,28 @@ add 选项:
   fsbar update
   fsbar update --download
   fsbar update --json
+`)
+	case "install-cli":
+		fmt.Fprint(w, `用法:
+  fsbar install-cli [--dir <目录>] [--json]
+
+说明:
+  将当前可执行文件以 fsbar 命令链接/注册到系统 PATH 目录（无需运行中实例）。
+  正式安装包安装或启动后会自动完成此步骤；手动移动应用目录或源码编译后，
+  也可通过本命令一键创建或刷新 PATH 链接。
+
+  - macOS：自动优先复用已有己方软链，否则选取可写的 /usr/local/bin、
+    /opt/homebrew/bin 或 ~/.local/bin 建立软链，绝不覆盖非 FlyShadow Bar 文件。
+  - Windows：生成 fsbar.cmd 并将目录注册至当前用户 PATH（HKCU\Environment）。
+
+选项:
+  -d, --dir <目录>         显式指定链接目标目录（如 ~/.local/bin）
+  --json                   以 JSON 格式输出链接路径与 PATH 状态
+
+示例:
+  fsbar install-cli
+  fsbar install-cli --dir ~/.local/bin
+  fsbar install-cli --json
 `)
 	case "help":
 		printHelp(w)

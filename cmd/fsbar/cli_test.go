@@ -56,7 +56,7 @@ func TestPrintHelpAndCommandHelp(t *testing.T) {
 	cmds := []string{
 		"status", "ls", "nodes", "node", "use", "mode", "udp", "native-udp",
 		"sysproxy", "ping", "reload", "rules", "rule", "conns", "connections",
-		"version", "update", "help",
+		"version", "update", "install-cli", "help",
 	}
 	for _, c := range cmds {
 		var buf bytes.Buffer

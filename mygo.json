@@ -14,6 +14,9 @@
       "LSUIElement": true
     }
   },
+  "windows": {
+    "installerInclude": "packaging/windows/installer.nsh"
+  },
   "updates": {
     "github": "KevinXC5/flyshadow-bar",
     "publicKey": "3Na40cmke9WwocCeifE65O+Ow7kdBxzq1l3Yaeu5qEc=",

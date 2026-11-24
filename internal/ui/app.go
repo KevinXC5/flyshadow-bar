@@ -10,6 +10,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/cliinstall"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/control"
 	"github.com/KevinXC5/flyshadow-bar/internal/engine"
@@ -176,6 +177,9 @@ func (a *App) onReady(opts RunOptions) {
 
 	// 仅在窗口打开且位于「连接」页时按需轮询活跃连接，平时零额外开销
 	go a.connectionsPollLoop()
+
+	// 安装完成后自动将命令行工具 fsbar 链接到对应的 PATH 目录（开发调试或隔离验收模式仅做只读检测）
+	go a.ensureCLIOnStartup(opts.DisableAutoSysProxy)
 
 	// 绑定 MyGo 签名增量更新的后台自动巡检、静默下载与就绪回调
 	if a.updates != nil {
@@ -501,6 +505,58 @@ func (a *App) setShowTraySpeed(show bool) {
 	a.prefs.ShowTraySpeed = show
 	_ = config.SaveAppPrefs("", a.prefs)
 	a.refreshTrayMenu()
+}
+
+// ensureCLIOnStartup 在应用启动后于后台检查并自动将 fsbar 链接至系统 PATH 目录。
+func (a *App) ensureCLIOnStartup(skipAutoWrite bool) {
+	var st cliinstall.Status
+	if skipAutoWrite {
+		st = cliinstall.Detect()
+	} else {
+		var err error
+		st, err = cliinstall.EnsureAuto()
+		if err != nil {
+			log.Printf("自动链接命令行工具 fsbar 失败: %v", err)
+			st = cliinstall.Detect()
+		} else if st.Changed && st.LinkPath != "" {
+			log.Printf("已自动链接命令行工具 fsbar -> %s", st.LinkPath)
+		}
+	}
+	mygo.RunOnMain(func() {
+		if a.vm != nil {
+			a.vm.cliStatus = st
+			a.vm.cliStatusLoaded = true
+		}
+		if a.win != nil && a.win.IsVisible() {
+			a.win.Invalidate()
+		}
+	})
+}
+
+// installCLILink 由设置页主动触发，立即创建或修复 fsbar 命令行 PATH 链接。
+func (a *App) installCLILink() {
+	go func() {
+		st, err := cliinstall.Ensure(cliinstall.Options{})
+		a.updateWindow(func() {
+			if a.vm == nil {
+				return
+			}
+			a.vm.cliInstalling = false
+			if err != nil {
+				a.vm.toastMsg = "链接 fsbar 失败: " + err.Error()
+				a.vm.cliStatus = cliinstall.Detect()
+				a.vm.cliStatusLoaded = true
+				return
+			}
+			a.vm.cliStatus = st
+			a.vm.cliStatusLoaded = true
+			if st.LinkPath != "" {
+				a.vm.toastMsg = "已链接 fsbar 至 " + st.LinkPath
+			} else {
+				a.vm.toastMsg = "命令行工具 fsbar 已就绪"
+			}
+		})
+	}()
 }
 
 func applyThemeSource(mode string) {

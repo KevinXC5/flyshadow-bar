@@ -52,7 +52,7 @@
 - **紧凑高容量原生 UI**：浅色 / 深色 / 跟随系统外观自适应；单屏直接展示 11+ 节点，支持搜索、收藏、按延迟排序、并发测速与一键复制终端代理环境变量。
 - **自定义规则热管理**：完整兼容官方 `~/.FlyShadow/config.json` 中的 `customRuleList`、`customRuleActiveLabels` 与全部 13 种官方匹配类型，支持极速添加、行内编辑、启停、删除与标签分组切换，修改后**无需断开隧道立即热生效**。
 - **实时连接监控与一键加规则闭环**：对接核心库 `get_tunnel_mapper_info_json` 与 `close_connect`，查看实时活跃连接的目标域名、进程名、路由结果与流量，可一键将任意目标加入直连/代理规则并踢掉旧连接使新规则即刻生效。
-- **单二进制内置 CLI**：无参数运行即启动常驻 GUI；携带子命令时自动发现并通过本机回环 Bearer Token 控制接口操控正在运行的实例，支持终端与 SSH 远程运维，全部命令支持 `--json` 输出。
+- **单二进制内置 CLI（自动链接 PATH）**：无参数运行即启动常驻 GUI；安装运行后自动将命令行工具 `fsbar` 链接/注册到系统 `PATH` 目录（macOS 自动软链至 `/usr/local/bin`、`/opt/homebrew/bin` 或 `~/.local/bin`，Windows 安装器与运行时自动生成 `fsbar.cmd` 并写入用户 `PATH`），支持终端与 SSH 远程运维，全部命令支持 `--json` 输出。
 - **跨平台系统代理与安全退出**：支持 macOS / Windows 系统代理一键开关、启动连上后自动开启（同步 `autoSetSysProxyOnStartUp`），退出时自动关闭系统代理并安全断开隧道。
 - **无损配置写回**：按 `map[string]json.RawMessage` 原子写回 `config.json`，完整保留账号 token、订阅密码等所有原生字段；本客户端自身外观偏好独立保存在 `flyshadow-bar.prefs.json`。
 - **自动静默增量更新**：基于 MyGo 原生更新器与 Ed25519 签名校验，启动后及每 30 分钟自动检测新版本，发现更新时直接在后台静默下载极小的二进制增量补丁（`.delta`）并完成验签安装，就绪后在弹窗顶部醒目位置一键「重启更新」；同时保留 CLI `fsbar update` 手动检查与下载能力。
@@ -108,7 +108,7 @@
 
 ## CLI 使用说明（`fsbar`）
 
-命令行工具名称为 **`fsbar`**（macOS 安装包内对应 `"/Applications/FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar"`，可软链至 `/usr/local/bin/fsbar` 或 `~/.local/bin/fsbar`；源码构建通过 `make build` 生成 `bin/fsbar`）。
+命令行工具名称为 **`fsbar`**。正式安装包安装并运行后会自动完成 `PATH` 链接（macOS 自动软链至可写的 `/usr/local/bin`、`/opt/homebrew/bin` 或 `~/.local/bin`，Windows 安装器与运行时自动配置 `fsbar.cmd` 并加入用户 `PATH`）；若手动移动应用位置或通过 `make build` 源码构建，也可执行 `fsbar install-cli` 或在「设置」页一键重新链接。
 
 无参数运行 `fsbar` 将默认静默启动至菜单栏 / 系统托盘（点击图标弹出面板，附加 `--show` 可启动时立即弹窗）。应用运行期间，可在终端直接调用以下子命令进行控制（均可附加 `--json` 输出结构化数据，运行 `fsbar help <子命令>` 或 `fsbar <子命令> --help` 查看完整参数与示例）：
 
@@ -130,6 +130,7 @@
 | `conns` | `connections` | 查看底层核心库当前的实时活跃连接列表 |
 | `version` | `-v` / `--version` | 输出客户端版本号、提交哈希与构建时间 |
 | `update` | - | 检查 GitHub Releases 最新版本（`--download` 自动下载安装包） |
+| `install-cli` | - | 将当前 `fsbar` 自动链接/注册到系统 `PATH` 目录（支持 `--dir` 指定目录） |
 | `help [cmd]` | `-h` / `--help` | 查看完整帮助或单个子命令的详尽参数说明 |
 
 ### 常用示例

@@ -2,14 +2,37 @@ package ui
 
 import (
 	"bytes"
+	_ "embed"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
 	"runtime"
+	"sync"
 
 	"github.com/egoist/mygo/ui"
 )
+
+//go:embed assets/logo.png
+var appLogoPNG []byte
+
+var (
+	appLogoOnce sync.Once
+	appLogoBmp  *ui.Bitmap
+)
+
+// appLogoBitmap 懒解码内嵌的应用 Logo 位图（全生命周期仅创建一次，避免每帧重复上传 GPU 纹理）。
+func appLogoBitmap() *ui.Bitmap {
+	appLogoOnce.Do(func() {
+		if len(appLogoPNG) == 0 {
+			return
+		}
+		if bmp, err := ui.DecodeBitmap(appLogoPNG); err == nil {
+			appLogoBmp = bmp
+		}
+	})
+	return appLogoBmp
+}
 
 // 界面内置矢量 SVG 图标（线条克制简洁，统一 16x16 坐标系）。
 var (
@@ -22,21 +45,28 @@ var (
 	svgPower       = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg>`))
 )
 
-// makeTrayIconPNG 生成 32x32 高清抗锯齿托盘图标（与 App Logo 呼应的双层几何飞翼造型）。
-// macOS 上使用纯黑透明模板图由系统自动反色适配深浅菜单栏；
-// Windows 上使用高对比度晴空蓝双翼 + 翡翠绿连接点，深浅任务栏均清晰醒目。
+// makeTrayIconPNG 生成当前平台的高清抗锯齿托盘图标（与 App Logo 呼应的双层几何飞翼造型）。
 func makeTrayIconPNG(connected bool) []byte {
-	const size = 32
+	return makeTrayIconPNGForOS(connected, runtime.GOOS)
+}
+
+// makeTrayIconPNGForOS 按目标平台生成托盘图标：
+// - macOS（darwin）：36x36（18pt @2x Retina）严格纯黑透明模板图（R=0,G=0,B=0，零彩色像素），
+//   配合 IconIsTemplate=true 由系统自动按浅/深菜单栏渲染为纯黑或纯白色；
+// - Windows 等平台：使用高对比度冰青蓝双翼 + 翡翠绿连接状态点，深浅任务栏均清晰醒目。
+func makeTrayIconPNGForOS(connected bool, goos string) []byte {
+	const size = 36
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 
+	// 默认采用纯黑单色模板像素（macOS 严禁使用原生彩色图标）
 	primary := color.NRGBA{R: 0, G: 0, B: 0, A: 255}
-	secondary := color.NRGBA{R: 0, G: 0, B: 0, A: 170}
-	accent := color.NRGBA{R: 16, G: 185, B: 129, A: 255} // 翡翠绿指示点
+	secondary := color.NRGBA{R: 0, G: 0, B: 0, A: 165}
+	accent := color.NRGBA{R: 16, G: 185, B: 129, A: 255} // 仅非 macOS 平台使用的翡翠绿状态点
 
-	if runtime.GOOS == "darwin" {
+	if goos == "darwin" {
 		if !connected {
-			primary.A = 145
-			secondary.A = 95
+			primary.A = 140
+			secondary.A = 88
 		}
 	} else {
 		if connected {
@@ -48,21 +78,21 @@ func makeTrayIconPNG(connected bool) []byte {
 		}
 	}
 
-	// 前层主飞翼（饱满足够醒目，居中占满 32x32 视觉安全区）
+	// 前层主飞翼（按 36x36 Retina 菜单栏安全区精修，与 App Logo 双翼轮廓一致）
 	frontWing := [][2]float64{
-		{28.5, 4.0},  // 主机头
-		{3.5, 13.5},  // 左翼尖
-		{12.5, 16.5}, // 中折点
-		{11.5, 27.0}, // 下尾尖
-		{18.5, 18.5}, // 右内折
-		{28.5, 4.0},
+		{32.0, 4.5},  // 主机头
+		{4.0, 15.2},  // 左翼尖
+		{14.1, 18.6}, // 中折点
+		{13.0, 30.4}, // 下尾尖
+		{20.8, 20.8}, // 右内折
+		{32.0, 4.5},
 	}
-	// 后层影翼（右下错位叠层，呼应 Logo 双翼层次）
+	// 后层影翼（右下错位叠层，保留清晰缝隙勾勒立体双翼层次）
 	shadowWing := [][2]float64{
-		{28.5, 11.5}, // 影翼尖
-		{17.5, 17.5}, // 中连接
-		{16.0, 28.0}, // 影尾尖
-		{28.5, 11.5},
+		{32.0, 12.9}, // 影翼尖
+		{19.7, 19.7}, // 中连接
+		{18.0, 31.5}, // 影尾尖
+		{32.0, 12.9},
 	}
 
 	const ss = 4
@@ -75,11 +105,11 @@ func makeTrayIconPNG(connected bool) []byte {
 					px := float64(x) + (float64(sx)+0.5)/ss
 					py := float64(y) + (float64(sy)+0.5)/ss
 					inFront := pointInPoly(px, py, frontWing) &&
-						!pointNearSegment(px, py, 12.2, 16.3, 25.0, 7.2, 0.95)
+						!pointNearSegment(px, py, 13.7, 18.3, 28.2, 8.1, 1.05)
 					if inFront {
 						frontHits++
 					} else if pointInPoly(px, py, shadowWing) &&
-						!pointNearSegment(px, py, 18.5, 18.5, 11.5, 27.0, 1.35) {
+						!pointNearSegment(px, py, 20.8, 20.8, 13.0, 30.4, 1.50) {
 						shadowHits++
 					}
 				}
@@ -99,15 +129,15 @@ func makeTrayIconPNG(connected bool) []byte {
 	}
 
 	// Windows 非模板图标在右下角加连接状态绿点
-	if runtime.GOOS != "darwin" && connected {
-		cx, cy, rad := 26.0, 26.0, 3.8
-		for y := 20; y < size; y++ {
-			for x := 20; x < size; x++ {
+	if goos != "darwin" && connected {
+		cx, cy, rad := 29.2, 29.2, 4.2
+		for y := 22; y < size; y++ {
+			for x := 22; x < size; x++ {
 				d := math.Hypot(float64(x)+0.5-cx, float64(y)+0.5-cy)
-				if d <= rad+0.8 {
+				if d <= rad+0.9 {
 					alpha := 1.0
 					if d > rad-0.5 {
-						alpha = max(0, (rad+0.8-d)/1.3)
+						alpha = max(0, (rad+0.9-d)/1.4)
 					}
 					if alpha > 0 {
 						img.SetNRGBA(x, y, color.NRGBA{

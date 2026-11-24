@@ -1,8 +1,8 @@
 ## 下载与安装
 
-- **macOS（Apple Silicon / M 系列）**：下载 `flyshadow-bar-*-arm64.dmg`，打开后将 `FlyShadow Bar.app` 拖入「应用程序」文件夹即可运行；启动后默认静默驻留顶部菜单栏，**左键点击图标弹出/收起面板，右键打开快捷菜单**（命令行工具 `fsbar` 可软链至应用内的 `FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar`，例如 `ln -sf "/Applications/FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar" ~/.local/bin/fsbar`）。
+- **macOS（Apple Silicon / M 系列）**：下载 `flyshadow-bar-*-arm64.dmg`，打开后将 `FlyShadow Bar.app` 拖入「应用程序」文件夹即可运行；启动后默认静默驻留顶部菜单栏（原生黑白模板图标随浅/深菜单栏自适应），**左键点击图标弹出/收起面板，右键打开快捷菜单**，并自动将命令行工具 `fsbar` 软链至可用的 `PATH` 目录（`/usr/local/bin`、`/opt/homebrew/bin` 或 `~/.local/bin`）。
 - **macOS（Intel / x64）**：下载 `flyshadow-bar-*-amd64.dmg`，打开后拖入「应用程序」文件夹运行。
-- **Windows（x64）**：下载 `flyshadow-bar-setup-*-amd64.exe` 安装运行；启动后默认静默驻留任务栏右下角系统托盘，**左键点击托盘图标弹出/收起面板，右键打开快捷菜单**。
+- **Windows（x64）**：下载 `flyshadow-bar-setup-*-amd64.exe` 安装运行；安装完成自动注册 `fsbar` 至当前用户 `PATH`，启动后默认静默驻留任务栏右下角系统托盘，**左键点击托盘图标弹出/收起面板，右键打开快捷菜单**。
 - **自动静默增量更新**：从正式安装包运行后，启动与每 30 分钟会自动检测新版本并在后台静默下载 **Ed25519 签名二进制增量补丁（`.delta`）**，安装就绪后在弹窗顶部醒目提示一键「重启更新」，无需手动下载整包。
 - 首次启动会自动读取官方 `~/.FlyShadow/config.json`、对应架构的原生核心库（`libflyshadow_core_lib.dylib` / `flyshadow_core_lib.dll`）及 GeoIP 数据库，无需额外配置。
 - 可通过 `checksums.txt` 核验所有安装包、归档与增量补丁的 SHA-256 校验和。
