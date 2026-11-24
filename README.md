@@ -48,7 +48,7 @@
 ## 核心特性
 
 - **单进程直连原生核心库**：macOS 通过 `purego`、Windows 通过 `x/sys/windows` 以零 CGO 方式加载官方底层动态库（`libflyshadow_core_lib.dylib` / `flyshadow_core_lib.dll`），自动加载 GeoIP 与分流规则。
-- **菜单栏与系统托盘极速控制**：常驻 macOS 菜单栏（默认隐藏 Dock 图标，可选等宽字体实时速率显示）与 Windows 系统托盘；支持模式切换、节点子菜单（收藏置顶、彩色延迟徽章、macOS 原地热切换）、系统代理、UDP 加速（QUIC）、原生 UDP、一键测速与安全退出。
+- **菜单栏与系统托盘极速控制**：启动默认静默驻留 macOS 菜单栏（隐藏 Dock 图标，可选等宽字体实时速率显示）与 Windows 系统托盘（隐藏任务栏占位）；**左键点击图标直接在图标附近弹出 / 收起面板，右键弹出快捷菜单**（模式切换、节点子菜单、系统代理、UDP 加速、原生 UDP、一键测速与安全退出），macOS 与 Windows 交互一致。
 - **紧凑高容量原生 UI**：浅色 / 深色 / 跟随系统外观自适应；单屏直接展示 11+ 节点，支持搜索、收藏、按延迟排序、并发测速与一键复制终端代理环境变量。
 - **自定义规则热管理**：完整兼容官方 `~/.FlyShadow/config.json` 中的 `customRuleList`、`customRuleActiveLabels` 与全部 13 种官方匹配类型，支持极速添加、行内编辑、启停、删除与标签分组切换，修改后**无需断开隧道立即热生效**。
 - **实时连接监控与一键加规则闭环**：对接核心库 `get_tunnel_mapper_info_json` 与 `close_connect`，查看实时活跃连接的目标域名、进程名、路由结果与流量，可一键将任意目标加入直连/代理规则并踢掉旧连接使新规则即刻生效。
@@ -110,7 +110,7 @@
 
 命令行工具名称为 **`fsbar`**（macOS 安装包内对应 `"/Applications/FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar"`，可软链至 `/usr/local/bin/fsbar` 或 `~/.local/bin/fsbar`；源码构建通过 `make build` 生成 `bin/fsbar`）。
 
-无参数运行 `fsbar` 将启动菜单栏 / 托盘 GUI（支持 `--hidden` 静默驻留托盘）。应用运行期间，可在终端直接调用以下子命令进行控制（均可附加 `--json` 输出结构化数据，运行 `fsbar help <子命令>` 或 `fsbar <子命令> --help` 查看完整参数与示例）：
+无参数运行 `fsbar` 将默认静默启动至菜单栏 / 系统托盘（点击图标弹出面板，附加 `--show` 可启动时立即弹窗）。应用运行期间，可在终端直接调用以下子命令进行控制（均可附加 `--json` 输出结构化数据，运行 `fsbar help <子命令>` 或 `fsbar <子命令> --help` 查看完整参数与示例）：
 
 | 子命令 | 别名 | 说明 |
 | --- | --- | --- |

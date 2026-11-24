@@ -551,8 +551,9 @@ func printHelp(w io.Writer) {
   fsbar <子命令> --help                     同上，无需实例运行即可查看
 
 GUI 启动选项（直接启动桌面端时生效）:
-  --gui                                     显式以 GUI 桌面模式启动（默认行为）
-  --hidden                                  静默启动到菜单栏/系统托盘，不自动弹出主窗口
+  --gui                                     显式以 GUI 桌面模式启动（默认静默驻留菜单栏/托盘）
+  --hidden                                  静默启动到菜单栏/系统托盘（默认行为）
+  --show                                    启动时立即弹出主窗口（默认仅点击托盘图标时弹出）
   --config <路径>                           指定 FlyShadow config.json 文件路径
   --core-lib <路径>                         显式指定原生核心库路径（.dylib / .dll）
   --no-connect                              启动后仅监听本地代理，不自动连接隧道

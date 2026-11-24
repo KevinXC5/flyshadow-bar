@@ -135,34 +135,18 @@ func (a *App) onReady(opts RunOptions) {
 	initialSnap := a.eng.Snapshot()
 	a.vm = newViewModel(a, initialSnap)
 
-	hidden := opts.StartHidden || mygo.App.WasOpenedAtLogin()
-	a.win = mygo.NewWindow(mygo.WindowOptions{
-		Title:         "FlyShadow Bar",
-		Width:         500,
-		Height:        780,
-		MinWidth:      440,
-		MinHeight:     580,
-		StateKey:      "main-v2",
-		Hidden:        hidden,
-		TitleBarStyle: mygo.TitleBarHidden,
-		Content:       ui.View(a.vm.render),
-	})
-
-	// 点击窗口关闭按钮时隐藏至托盘而非退出，仅在真正退出应用时放行关闭
-	a.win.OnClose(func(e *mygo.CloseEvent) {
-		if !a.quitting {
-			e.PreventDefault()
-			a.win.Hide()
-			a.refreshTrayMenu()
-		}
-	})
-	a.win.OnShow(func() { a.refreshTrayMenu() })
-	a.win.OnHide(func() { a.refreshTrayMenu() })
-
 	var err error
 	a.tray, err = newTrayController(a)
 	if err != nil {
 		log.Printf("创建系统托盘失败: %v", err)
+	}
+
+	// 启动默认静默驻留菜单栏 / 系统托盘，不提前创建主窗口；
+	// 仅在显式传 --show 且非开机自启时立即弹出。
+	hidden := opts.StartHidden || mygo.App.WasOpenedAtLogin()
+	if !hidden {
+		a.ensureWindow()
+		a.showWindow()
 	}
 
 	// 订阅引擎状态快照，实时驱动托盘和主窗口刷新
@@ -193,12 +177,15 @@ func (a *App) onReady(opts RunOptions) {
 	// 绑定 MyGo 签名增量更新的后台通知与进度节流回调
 	if a.updates != nil {
 		a.updates.availableFn = func(st UpdateStatus) {
-			a.updateWindow(func() {
+			mygo.RunOnMain(func() {
 				if a.vm != nil {
 					a.vm.applyNativeUpdateStatus(st)
 				}
+				if a.win != nil && a.win.IsVisible() {
+					a.win.Invalidate()
+				}
+				a.refreshTrayMenu()
 			})
-			mygo.RunOnMain(func() { a.refreshTrayMenu() })
 		}
 		fn, reset := newThrottledUpdateProgress(func(downloaded, total int64) {
 			a.updateWindow(func() {
@@ -212,6 +199,41 @@ func (a *App) onReady(opts RunOptions) {
 		a.updateProgressReset = reset
 		a.updates.StartBackground(a.stopCh)
 	}
+}
+
+// ensureWindow 按需懒创建主窗口，避免默认静默驻留托盘时产生多余窗口对象与显存开销。
+func (a *App) ensureWindow() {
+	if a.win != nil {
+		return
+	}
+	if a.vm == nil {
+		a.vm = newViewModel(a, a.eng.Snapshot())
+	} else {
+		a.vm.snap = a.eng.Snapshot()
+	}
+	a.win = mygo.NewWindow(mygo.WindowOptions{
+		Title:         "FlyShadow Bar",
+		Width:         500,
+		Height:        780,
+		MinWidth:      440,
+		MinHeight:     580,
+		StateKey:      "main-v2",
+		Hidden:        true,
+		SkipTaskbar:   true,
+		TitleBarStyle: mygo.TitleBarHidden,
+		Content:       ui.View(a.vm.render),
+	})
+
+	// 点击窗口关闭按钮时隐藏至托盘而非退出，仅在真正退出应用时放行关闭
+	a.win.OnClose(func(e *mygo.CloseEvent) {
+		if !a.quitting {
+			e.PreventDefault()
+			a.win.Hide()
+			a.refreshTrayMenu()
+		}
+	})
+	a.win.OnShow(func() { a.refreshTrayMenu() })
+	a.win.OnHide(func() { a.refreshTrayMenu() })
 }
 
 func (a *App) connectionsPollLoop() {
@@ -277,6 +299,7 @@ func (a *App) isWindowVisible() bool {
 }
 
 func (a *App) showWindow() {
+	a.ensureWindow()
 	if a.win == nil {
 		return
 	}
@@ -304,10 +327,107 @@ func (a *App) toggleWindow() {
 	}
 }
 
+// toggleWindowFromTray 在点击菜单栏 / 系统托盘图标时切换主窗口显隐，
+// 弹出前自动将窗口定位到图标附近（macOS 菜单栏正下方 / Windows 任务栏托盘正上方）。
+func (a *App) toggleWindowFromTray() {
+	if a.isWindowVisible() {
+		a.hideWindow()
+		return
+	}
+	a.ensureWindow()
+	a.positionWindowNearTray()
+	a.showWindow()
+}
+
+func (a *App) positionWindowNearTray() {
+	if a.win == nil || a.tray == nil || a.tray.tray == nil {
+		return
+	}
+	winBounds := a.win.Bounds()
+	winW, winH := winBounds.Width, winBounds.Height
+	if winW <= 0 {
+		winW = 500
+	}
+	if winH <= 0 {
+		winH = 780
+	}
+
+	trayRect := a.tray.tray.Bounds()
+	var display mygo.Display
+	if trayRect.Width > 0 || trayRect.Height > 0 {
+		center := mygo.Point{
+			X: trayRect.X + trayRect.Width/2,
+			Y: trayRect.Y + trayRect.Height/2,
+		}
+		display = mygo.Screen.DisplayNearestPoint(center)
+	} else {
+		display = mygo.Screen.PrimaryDisplay()
+	}
+
+	workArea := display.WorkArea
+	if workArea.Width <= 0 || workArea.Height <= 0 {
+		workArea = display.Bounds
+	}
+	if x, y, ok := calcTrayPopoverPos(trayRect, workArea, winW, winH, runtime.GOOS); ok {
+		a.win.SetPosition(x, y)
+	}
+}
+
+// calcTrayPopoverPos 计算窗口紧贴菜单栏 / 系统托盘图标的弹出坐标，并夹紧在屏幕工作区内。
+func calcTrayPopoverPos(trayRect, workArea mygo.Rectangle, winW, winH int, goos string) (x, y int, ok bool) {
+	if workArea.Width <= 0 || workArea.Height <= 0 || winW <= 0 || winH <= 0 {
+		return 0, 0, false
+	}
+	const margin = 8
+
+	hasTray := trayRect.Width > 0 && trayRect.Height > 0
+	if !hasTray {
+		// Windows 托盘图标被折叠在溢出区或取不到坐标时，贴工作区右下角（macOS 贴右上角）显示
+		x = workArea.X + workArea.Width - winW - margin
+		if goos == "darwin" {
+			y = workArea.Y + margin
+		} else {
+			y = workArea.Y + workArea.Height - winH - margin
+		}
+	} else {
+		x = trayRect.X + (trayRect.Width-winW)/2
+		if goos == "darwin" {
+			// macOS：紧贴菜单栏图标下方
+			y = max(trayRect.Y+trayRect.Height+6, workArea.Y+4)
+		} else {
+			// Windows：判断托盘位于工作区底部还是顶部
+			if trayRect.Y >= workArea.Y+workArea.Height/2 {
+				y = min(trayRect.Y-winH-margin, workArea.Y+workArea.Height-winH-margin)
+			} else {
+				y = max(trayRect.Y+trayRect.Height+margin, workArea.Y+margin)
+			}
+		}
+	}
+
+	minX := workArea.X + margin
+	maxX := workArea.X + workArea.Width - winW - margin
+	if maxX < minX {
+		x = workArea.X
+	} else {
+		x = max(minX, min(x, maxX))
+	}
+
+	minY := workArea.Y + 4
+	maxY := workArea.Y + workArea.Height - winH - margin
+	if maxY < minY {
+		y = workArea.Y
+	} else {
+		y = max(minY, min(y, maxY))
+	}
+	return x, y, true
+}
+
 func (a *App) openSettingsTab() {
+	a.ensureWindow()
 	if a.vm != nil {
 		a.vm.activeTab = 3
 	}
+	a.positionWindowNearTray()
 	a.showWindow()
 }
 

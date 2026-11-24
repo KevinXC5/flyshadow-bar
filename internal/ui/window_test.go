@@ -3,6 +3,7 @@ package ui
 import (
 	"testing"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
@@ -123,5 +124,34 @@ func TestFormatHelpers(t *testing.T) {
 	}
 	if got := FormatDelay(-1, false); got != "超时" {
 		t.Fatalf("FormatDelay(-1) = %q", got)
+	}
+}
+
+func TestCalcTrayPopoverPos(t *testing.T) {
+	work := mygo.Rectangle{X: 0, Y: 25, Width: 1440, Height: 875}
+
+	// macOS：靠近右侧菜单栏图标，应夹紧在屏幕右边缘内并位于顶栏下方
+	x, y, ok := calcTrayPopoverPos(mygo.Rectangle{X: 1320, Y: 0, Width: 28, Height: 25}, work, 500, 780, "darwin")
+	if !ok {
+		t.Fatalf("darwin popover pos should succeed")
+	}
+	if x != 1440-500-8 || y != 31 {
+		t.Fatalf("darwin right-edge pos = (%d,%d), want (%d,%d)", x, y, 1440-500-8, 31)
+	}
+
+	// Windows：底部任务栏托盘图标上方弹出
+	winWork := mygo.Rectangle{X: 0, Y: 0, Width: 1920, Height: 1032}
+	x, y, ok = calcTrayPopoverPos(mygo.Rectangle{X: 1700, Y: 1032, Width: 32, Height: 48}, winWork, 500, 780, "windows")
+	if !ok {
+		t.Fatalf("windows popover pos should succeed")
+	}
+	if x != 1920-500-8 || y != 1032-780-8 {
+		t.Fatalf("windows bottom-taskbar pos = (%d,%d), want (%d,%d)", x, y, 1920-500-8, 1032-780-8)
+	}
+
+	// 兜底：无有效托盘矩形时（例如 Windows 溢出折叠区），贴右下角工作区弹出
+	x, y, ok = calcTrayPopoverPos(mygo.Rectangle{}, winWork, 500, 780, "windows")
+	if !ok || x != 1920-500-8 || y != 1032-780-8 {
+		t.Fatalf("windows fallback pos = (%d,%d,ok=%v)", x, y, ok)
 	}
 }

@@ -3,6 +3,8 @@
   "slug": "flyshadow-bar",
   "identifier": "com.kevinxc.flyshadow-bar",
   "version": "0.1.0-dev",
+  "icon": "resources/icon.png",
+  "resourcesExclude": ["icon.png"],
   "main": "./cmd/fsbar",
   "out": "dist",
   "macos": {

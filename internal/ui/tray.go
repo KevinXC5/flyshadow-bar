@@ -46,20 +46,47 @@ func newTrayController(app *App) (*trayController, error) {
 		icon = iconConn
 	}
 
+	// macOS 上若给 Tray 设置常驻 Menu，左键会直接弹菜单而无法触发 OnClick；
+	// 因此 macOS 保持 Menu 为 nil，左键弹/收主窗口，右键（或 Control+点击）临时弹出快捷菜单。
+	// Windows 后端在左键始终触发 OnClick、右键自动弹出 Menu，双端交互完全一致。
+	var attachedMenu *mygo.Menu
+	if runtime.GOOS != "darwin" {
+		attachedMenu = tc.menu
+	}
+
 	tray, err := mygo.NewTray(mygo.TrayOptions{
 		ID:              "flyshadow-bar-main",
 		Icon:            icon,
 		IconIsTemplate:  runtime.GOOS == "darwin",
 		MonospacedTitle: true,
 		ToolTip:         trayTooltip(snap),
-		Menu:            tc.menu,
+		Menu:            attachedMenu,
 	})
 	if err != nil {
 		return nil, err
 	}
 	tc.tray = tray
+	tc.tray.OnClick(func() {
+		tc.app.toggleWindowFromTray()
+	})
+	if runtime.GOOS == "darwin" {
+		tc.tray.OnRightClick(func() {
+			tc.popUpContextMenu()
+		})
+	}
 	tc.syncTitle(snap)
 	return tc, nil
+}
+
+// popUpContextMenu 在 macOS 右键（或 Control+点击）菜单栏图标时弹出快捷菜单，
+// 关闭菜单后立即卸载 Menu，确保下次左键点击依然弹出主窗口。
+func (tc *trayController) popUpContextMenu() {
+	if tc == nil || tc.tray == nil || tc.menu == nil {
+		return
+	}
+	tc.tray.SetMenu(tc.menu)
+	tc.tray.PopUpMenu()
+	tc.tray.SetMenu(nil)
 }
 
 func (tc *trayController) Destroy() {
@@ -92,7 +119,10 @@ func (tc *trayController) Update(snap engine.Snapshot) {
 	if sig != tc.lastNodeSig {
 		tc.lastNodeSig = sig
 		tc.menu = tc.buildMenu(snap)
-		tc.tray.SetMenu(tc.menu)
+		// macOS 保持常驻 Menu 为 nil（右键按需弹出），仅在非 macOS 平台同步绑定菜单
+		if runtime.GOOS != "darwin" {
+			tc.tray.SetMenu(tc.menu)
+		}
 		return
 	}
 

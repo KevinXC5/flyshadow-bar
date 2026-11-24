@@ -37,7 +37,7 @@ func isGUILaunch(args []string) bool {
 	}
 	first := args[0]
 	switch first {
-	case "gui", "--gui", "--hidden", "-hidden", "--no-connect", "-no-connect",
+	case "gui", "--gui", "--hidden", "-hidden", "--show", "-show", "--no-connect", "-no-connect",
 		"--no-auto-sysproxy", "-no-auto-sysproxy",
 		"--config", "-config", "--core-lib", "-core-lib":
 		return true
@@ -56,7 +56,8 @@ func runGUI(args []string) error {
 	}
 	cfgPath := fs.String("config", "", "指定 FlyShadow config.json 路径")
 	libPath := fs.String("core-lib", "", "指定 FlyShadow 核心动态库路径")
-	hidden := fs.Bool("hidden", false, "启动后隐藏主窗口，仅驻留托盘")
+	hidden := fs.Bool("hidden", true, "静默启动到菜单栏/系统托盘（默认开启）")
+	show := fs.Bool("show", false, "启动时立即弹出主窗口")
 	noConnect := fs.Bool("no-connect", false, "启动后不自动连接隧道")
 	noAutoSys := fs.Bool("no-auto-sysproxy", false, "禁用启动连接后自动开启系统代理")
 	if err := fs.Parse(args); err != nil {
@@ -66,10 +67,11 @@ func runGUI(args []string) error {
 		return err
 	}
 
+	startHidden := *hidden && !*show
 	return ui.Run(ui.RunOptions{
 		ConfigPath:          *cfgPath,
 		CoreLibPath:         *libPath,
-		StartHidden:         *hidden,
+		StartHidden:         startHidden,
 		NoConnect:           *noConnect,
 		DisableAutoSysProxy: *noAutoSys,
 	})
