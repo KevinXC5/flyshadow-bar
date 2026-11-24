@@ -12,6 +12,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/chart"
+	"github.com/egoist/mygo/ui/markdown"
 
 	"github.com/KevinXC5/flyshadow-bar/internal/cliinstall"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
@@ -67,6 +68,7 @@ type viewModel struct {
 	updateCancel        context.CancelFunc
 	updateResult        *updater.CheckResult
 	updateErr           string
+	updateMarkdownOpts  markdown.Options
 	cliStatus           cliinstall.Status
 	cliStatusLoaded     bool
 	cliInstalling       bool
@@ -175,8 +177,7 @@ func (vm *viewModel) render(c *ui.Context) {
 		} else if c.Shortcut(0, ui.KeyEscape) {
 			if vm.subModalOpen {
 				if !vm.subSaving {
-					vm.subModalOpen = false
-					vm.subModalErr = ""
+					vm.closeSubscribeModal()
 				}
 			} else {
 				vm.app.hideWindow()
@@ -216,9 +217,7 @@ func (vm *viewModel) render(c *ui.Context) {
 	ui.Column(c).Fill().Background(p.canvas).Children(func() {
 		vm.renderTitleBar(c, p)
 		ui.Column(c).Grow(1).Padding(4, 14, 12, 14).Gap(9).Children(func() {
-			if vm.updateInstalled && vm.updateAvailable != "" {
-				vm.renderUpdateReadyBanner(c, p)
-			}
+			vm.renderUpdateTopBanner(c, p)
 			vm.renderCompactOverview(c, p)
 			switch vm.activeTab {
 			case 0:
@@ -261,24 +260,7 @@ func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 	})
 }
 
-// renderUpdateReadyBanner 当后台静默更新安装完成后，在弹窗顶部提示一键重启生效。
-func (vm *viewModel) renderUpdateReadyBanner(c *ui.Context, p palette) {
-	ui.Row(c).Padding(8, 12).Gap(10).Radius(11).AlignItems(ui.Center).
-		Background(p.successSoft).Border(1, p.success).Children(func() {
-		ui.Box(c).Size(8, 8).Radius(99).Background(p.success)
-		ui.Column(c).Grow(1).Gap(1).Children(func() {
-			ui.Text(c, fmt.Sprintf("新版本 %s 已就绪", vm.updateAvailable)).
-				FontSize(12.5).Bold().TextColor(p.success)
-			ui.Text(c, "重启后生效").
-				FontSize(10.5).TextColor(p.textSecondary)
-		})
-		if ui.PrimaryButton(c.Key("btn-banner-restart"), "立即重启").Padding(5, 12).Radius(7).Clicked() {
-			vm.restartForUpdate()
-		}
-	})
-}
-
-// renderCompactOverview 紧凑高密度顶部概览区：当前节点 + 实时速率折线图 + 订阅流量条 + 模式与快捷开关。
+// renderCompactOverview 紧凑高密度顶部概览区：当前节点 + 实时速率折线图 + 订阅流量卡 + 模式与快捷开关。
 func (vm *viewModel) renderCompactOverview(c *ui.Context, p palette) {
 	snap := vm.snap
 	nodeName := "未选择节点"
@@ -579,6 +561,17 @@ func (vm *viewModel) renderSubscriptionCard(c *ui.Context, p palette, snap engin
 
 func (vm *viewModel) openSubscribeModal() {
 	vm.subModalOpen = true
+	if vm.app != nil && vm.app.eng != nil {
+		vm.subPasswordDraft = vm.app.eng.SubscribePassword()
+	} else {
+		vm.subPasswordDraft = ""
+	}
+	vm.subPasswordShow = false
+	vm.subModalErr = ""
+}
+
+func (vm *viewModel) closeSubscribeModal() {
+	vm.subModalOpen = false
 	vm.subPasswordDraft = ""
 	vm.subPasswordShow = false
 	vm.subModalErr = ""
@@ -612,8 +605,7 @@ func (vm *viewModel) renderSubscribeModal(c *ui.Context, p palette) {
 					ui.Icon(c, svgClose).Size(13, 13).TextColor(p.textMuted)
 				})
 				if !vm.subSaving && closeBtn.Clicked() {
-					vm.subModalOpen = false
-					vm.subModalErr = ""
+					vm.closeSubscribeModal()
 				}
 			})
 
@@ -662,8 +654,7 @@ func (vm *viewModel) renderSubscribeModal(c *ui.Context, p palette) {
 				ui.Spacer(c)
 				if ui.Button(c.Key("btn-sub-cancel"), "取消").Padding(6, 14).Radius(7).
 					Disabled(vm.subSaving).Clicked() {
-					vm.subModalOpen = false
-					vm.subModalErr = ""
+					vm.closeSubscribeModal()
 				}
 				saveLabel := "保存并同步"
 				if vm.subSaving {
@@ -676,9 +667,13 @@ func (vm *viewModel) renderSubscribeModal(c *ui.Context, p palette) {
 			})
 		})
 	})
-	if modal.Dismissed() && vm.subSaving {
-		// 正在校验同步期间防止误触背景关闭弹窗
-		vm.subModalOpen = true
+	if modal.Dismissed() {
+		if vm.subSaving {
+			// 正在校验同步期间防止误触背景关闭弹窗
+			vm.subModalOpen = true
+		} else {
+			vm.closeSubscribeModal()
+		}
 	}
 }
 
@@ -1082,12 +1077,6 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 
 			// 4. 关于与更新卡片
 			renderSectionCard(c, p, "关于与更新", func() {
-				if snap.Traffic != nil && snap.Traffic.TrafficSize > 0 {
-					used := snap.Traffic.TrafficUpload + snap.Traffic.TrafficDownload
-					renderKVRow(c, p, "订阅流量", fmt.Sprintf("已用 %s / %s · 到期 %s",
-						FormatBytes(used), FormatBytes(snap.Traffic.TrafficSize), FormatExpireDate(int64(snap.Traffic.ExpireTime))))
-					ui.Divider(c)
-				}
 				renderKVRow(c, p, "客户端版本", version.Full())
 				renderKVRow(c, p, "核心版本", nonEmpty(snap.CoreVersion, "未知"))
 				renderKVRow(c, p, "核心路径", nonEmpty(snap.CoreLibPath, "未检测到"))
@@ -1122,82 +1111,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				})
 
 				ui.Divider(c)
-				ui.Column(c).Gap(6).Children(func() {
-					ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-						updateText := fmt.Sprintf("当前版本 %s", version.Version)
-						updateColor := p.textMuted
-						switch {
-						case vm.updateInstalled:
-							updateText = fmt.Sprintf("新版本 %s 已就绪，重启后生效", vm.updateAvailable)
-							updateColor = p.success
-						case vm.updateDownloading:
-							if vm.updateTotal > 0 {
-								pct := min(100, int(vm.updateDownloaded*100/vm.updateTotal))
-								updateText = fmt.Sprintf("正在下载 %s（%d%%）", vm.updateAvailable, pct)
-							} else if vm.updateDownloaded > 0 {
-								updateText = fmt.Sprintf("正在下载 %s（%s）", vm.updateAvailable, FormatBytes(vm.updateDownloaded))
-							} else {
-								updateText = fmt.Sprintf("正在下载 %s…", vm.updateAvailable)
-							}
-							updateColor = p.accent
-						case vm.checkingUpdate:
-							updateText = "检查更新中…"
-							updateColor = p.accent
-						case vm.updateErr != "":
-							updateText = vm.updateErr
-							updateColor = p.danger
-						case vm.updateNativeEnabled && vm.updateAvailable != "":
-							updateText = fmt.Sprintf("有新版本 %s", vm.updateAvailable)
-							updateColor = p.success
-						case vm.updateResult != nil:
-							if vm.updateResult.HasUpdate {
-								updateText = fmt.Sprintf("有新版本 %s", vm.updateResult.LatestVersion)
-								updateColor = p.success
-							} else {
-								updateText = "已是最新版本"
-								updateColor = p.textSecondary
-							}
-						}
-						ui.Text(c, updateText).Grow(1).FontSize(11.5).TextColor(updateColor).Wrap()
-
-						switch {
-						case vm.updateInstalled:
-							if ui.PrimaryButton(c.Key("btn-restart-update"), "立即重启").Padding(5, 11).Radius(7).Clicked() {
-								vm.restartForUpdate()
-							}
-						case vm.updateDownloading:
-							if ui.Button(c.Key("btn-cancel-update"), "取消").Padding(5, 11).Radius(7).Clicked() {
-								vm.cancelUpdateDownload()
-							}
-						case vm.updateNativeEnabled && vm.updateAvailable != "":
-							if ui.PrimaryButton(c.Key("btn-install-update"), "立即更新").Padding(5, 11).Radius(7).Clicked() {
-								vm.installNativeUpdate()
-							}
-						case vm.updateResult != nil && vm.updateResult.HasUpdate && vm.updateResult.ReleaseURL != "":
-							if ui.PrimaryButton(c.Key("btn-open-release"), "前往下载").Padding(5, 11).Radius(7).Clicked() {
-								url := vm.updateResult.ReleaseURL
-								if vm.app != nil {
-									go func() { _ = mygo.Shell.OpenExternal(url) }()
-								}
-							}
-						}
-						if !vm.updateDownloading && !vm.updateInstalled {
-							if ui.Button(c.Key("btn-check-update"), "检查更新").Disabled(vm.checkingUpdate).Padding(5, 11).Radius(7).Clicked() {
-								vm.checkUpdate()
-							}
-						}
-					})
-
-					if vm.updateNativeEnabled && vm.updateAvailable != "" && strings.TrimSpace(vm.updateNotes) != "" && !vm.updateInstalled {
-						notes := strings.TrimSpace(vm.updateNotes)
-						if len([]rune(notes)) > 260 {
-							notes = string([]rune(notes)[:260]) + "…"
-						}
-						ui.Column(c).Padding(8, 10).Radius(8).Background(p.cardElevated).Children(func() {
-							ui.Text(c, notes).FontSize(11).TextColor(p.textSecondary).Wrap()
-						})
-					}
-				})
+				vm.renderUpdateSection(c, p)
 			})
 		})
 	})
@@ -1287,6 +1201,9 @@ func (vm *viewModel) installNativeUpdate() {
 func (vm *viewModel) cancelUpdateDownload() {
 	if vm.updateCancel != nil {
 		vm.updateCancel()
+	}
+	if vm.app != nil && vm.app.updates != nil {
+		vm.app.updates.CancelInstall()
 	}
 }
 

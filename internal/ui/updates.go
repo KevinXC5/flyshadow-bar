@@ -47,10 +47,11 @@ func (updateCanceledError) Unwrap() error { return context.Canceled }
 
 // UpdateManager 将检查、Ed25519 签名验证与 bsdiff 增量安装委托给 mygo.Updater。
 type UpdateManager struct {
-	mu        sync.Mutex
-	pending   *mygo.Update
-	busy      bool
-	installed bool
+	mu            sync.Mutex
+	pending       *mygo.Update
+	busy          bool
+	installed     bool
+	cancelInstall context.CancelFunc
 
 	cachedNotes        string
 	cachedNotesPending *mygo.Update
@@ -274,6 +275,14 @@ func (u *UpdateManager) Install(ctx context.Context) (UpdateStatus, error) {
 
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
+	u.mu.Lock()
+	u.cancelInstall = cancel
+	u.mu.Unlock()
+	defer func() {
+		u.mu.Lock()
+		u.cancelInstall = nil
+		u.mu.Unlock()
+	}()
 	idle := u.idleTimeout
 	if idle <= 0 {
 		idle = updateIdleTimeout
@@ -292,6 +301,16 @@ func (u *UpdateManager) Install(ctx context.Context) (UpdateStatus, error) {
 	u.installed = true
 	u.mu.Unlock()
 	return u.Status(), nil
+}
+
+// CancelInstall 取消当前正在进行的手动或后台自动更新下载。
+func (u *UpdateManager) CancelInstall() {
+	u.mu.Lock()
+	cancel := u.cancelInstall
+	u.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // Restart 在安装完成后安全重启应用并切换至新版本。

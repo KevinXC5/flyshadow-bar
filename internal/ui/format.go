@@ -50,6 +50,27 @@ func FormatSpeed(bps int64) string {
 	}
 }
 
+// FormatTraySpeed 返回适用于 macOS 双行菜单栏网速图的极紧凑速率文本（如 0B、3.6K、23K、1.2M）。
+func FormatTraySpeed(bps int64) string {
+	if bps < 0 {
+		bps = 0
+	}
+	switch {
+	case bps < 1000:
+		return fmt.Sprintf("%dB", bps)
+	case bps < 1024*10:
+		return fmt.Sprintf("%.1fK", float64(bps)/1024)
+	case bps < 1024*1000:
+		return fmt.Sprintf("%.0fK", float64(bps)/1024)
+	case bps < 1024*1024*10:
+		return fmt.Sprintf("%.1fM", float64(bps)/(1024*1024))
+	case bps < 1024*1024*1000:
+		return fmt.Sprintf("%.0fM", float64(bps)/(1024*1024))
+	default:
+		return fmt.Sprintf("%.1fG", float64(bps)/(1024*1024*1024))
+	}
+}
+
 // FormatCompactSpeed 返回固定 5 字符宽度的紧凑速率（配合 MonospacedTitle 防止菜单栏抖动）。
 func FormatCompactSpeed(bps int64) string {
 	if bps < 0 {

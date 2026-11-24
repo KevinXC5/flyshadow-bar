@@ -49,7 +49,10 @@ type SpeedSample struct {
 	DownloadBps int64 `json:"downloadBps"`
 }
 
-const maxSpeedHistoryPoints = 48
+const (
+	maxSpeedHistoryPoints        = 48
+	defaultSysProxyCheckInterval = 3 * time.Second
+)
 
 // Snapshot 是整个客户端运行状态的只读快照，用于 UI、托盘与本地控制 API。
 type Snapshot struct {
@@ -147,6 +150,9 @@ type Engine struct {
 	procLookupFn  func(proxyPort int) map[string]string
 	selfProcNames []string
 
+	sysProxyCheckInterval time.Duration
+	loopsOnce             sync.Once
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
@@ -189,11 +195,12 @@ func New(opts Options) (*Engine, error) {
 		testingNodes:        make(map[int]bool),
 		speedHistory:        make([]SpeedSample, maxSpeedHistoryPoints),
 		listeners:           make(map[int]func(Snapshot)),
-		connProcCache:       make(map[string]string),
-		procLookupFn:        lookupLoopbackClients,
-		selfProcNames:       currentSelfProcessNames(),
-		stopCh:              make(chan struct{}),
-		tunnelPingMs:        -1,
+		connProcCache:         make(map[string]string),
+		procLookupFn:          lookupLoopbackClients,
+		selfProcNames:         currentSelfProcessNames(),
+		sysProxyCheckInterval: defaultSysProxyCheckInterval,
+		stopCh:                make(chan struct{}),
+		tunnelPingMs:          -1,
 	}
 
 	// 加载 GeoIP（仅真实打开的核心库且非 mock 或文件存在时加载）
@@ -227,7 +234,10 @@ func (e *Engine) Start(autoConnect bool) error {
 		return err
 	}
 
-	go e.statsLoop()
+	e.loopsOnce.Do(func() {
+		go e.statsLoop()
+		go e.sysProxyWatchLoop()
+	})
 
 	if autoConnect {
 		if err := e.connectCurrentLocked(); err != nil {
@@ -643,11 +653,70 @@ func (e *Engine) UpdateLocalProxySettings(port int, allowLAN bool) error {
 
 	// 如果系统代理处于开启状态且端口变了，自动同步新端口
 	if sysProxyWasOn && oldPort != port {
-		_ = e.sysProxy.Enable("127.0.0.1", port)
+		if err := e.sysProxy.Enable("127.0.0.1", port); err != nil {
+			e.syncSystemProxyLocked()
+		}
 	}
 
 	e.emit()
 	return nil
+}
+
+// RefreshSystemProxy 主动核对操作系统当前真实的系统代理状态，若与内存状态不一致则更新并广播快照。
+// 当有其他状态变更操作正在执行时跳过本次检查，避免与正在进行的系统代理切换产生竞态。
+func (e *Engine) RefreshSystemProxy() bool {
+	if e.sysProxy == nil {
+		return false
+	}
+	if !e.opMu.TryLock() {
+		e.mu.RLock()
+		cur := e.systemProxyOn
+		e.mu.RUnlock()
+		return cur
+	}
+	defer e.opMu.Unlock()
+
+	return e.syncSystemProxyLocked()
+}
+
+func (e *Engine) syncSystemProxyLocked() bool {
+	if e.sysProxy == nil {
+		return false
+	}
+	e.mu.RLock()
+	port := e.cfg.ProxyPort
+	prev := e.systemProxyOn
+	e.mu.RUnlock()
+
+	enabled, err := e.sysProxy.IsEnabled("127.0.0.1", port)
+	if err != nil {
+		return prev
+	}
+	if enabled != prev {
+		e.mu.Lock()
+		e.systemProxyOn = enabled
+		e.mu.Unlock()
+		e.emit()
+	}
+	return enabled
+}
+
+func (e *Engine) sysProxyWatchLoop() {
+	interval := e.sysProxyCheckInterval
+	if interval <= 0 {
+		interval = defaultSysProxyCheckInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.stopCh:
+			return
+		case <-ticker.C:
+			e.RefreshSystemProxy()
+		}
+	}
 }
 
 // UpdateNetworkSettings 更新 IPv6 / 内置 DNS / 直连优先设置并实时应用到核心库。
@@ -754,6 +823,16 @@ func (e *Engine) SyncSubscription(ctx context.Context) (Snapshot, error) {
 	e.reloadRulesLocked()
 	e.emit()
 	return e.Snapshot(), nil
+}
+
+// SubscribePassword 返回当前已保存的订阅密码（仅供同进程 GUI 密码框回填查看，不经脱敏 Snapshot 对外暴露）。
+func (e *Engine) SubscribePassword() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.cfg == nil {
+		return ""
+	}
+	return e.cfg.SubscribePassword
 }
 
 // SetSubscribePassword 使用新订阅密码先向云端校验并拉取最新节点、流量与自定义规则，
@@ -1190,6 +1269,7 @@ func (e *Engine) Reload() error {
 			return err
 		}
 	}
+	e.syncSystemProxyLocked()
 	e.emit()
 	return nil
 }
@@ -1413,8 +1493,10 @@ func (e *Engine) connectCurrentLocked() error {
 	if connected {
 		e.state = StateConnected
 		e.lastError = ""
-		e.lastUploadBytes = e.core.TunnelUploadBytes()
-		e.lastDownloadBytes = e.core.TunnelDownloadBytes()
+		e.lastUploadBytes = 0
+		e.lastDownloadBytes = 0
+		e.uploadSpeedBps = 0
+		e.downloadSpeedBps = 0
 		e.lastSampleTime = time.Now()
 		e.tunnelPingMs = e.core.TunnelPingDelay()
 	} else {
@@ -1454,8 +1536,16 @@ func (e *Engine) sampleStats(now time.Time) {
 	}
 
 	status := e.core.TunnelStatus()
+	// 核心库 get_tunnel_upload / get_tunnel_download 在 1s 周期下直接返回当前每秒上下行字节数（Bytes/s），
+	// 与官方客户端 ProxyService 行为一致，不可对相邻两次读数做差值相减。
 	up := e.core.TunnelUploadBytes()
 	down := e.core.TunnelDownloadBytes()
+	if up < 0 {
+		up = 0
+	}
+	if down < 0 {
+		down = 0
+	}
 	ping := e.core.TunnelPingDelay()
 
 	e.mu.Lock()
@@ -1463,23 +1553,10 @@ func (e *Engine) sampleStats(now time.Time) {
 		e.state = StateConnected
 		e.lastError = ""
 	}
-	if !e.lastSampleTime.IsZero() {
-		dt := now.Sub(e.lastSampleTime).Seconds()
-		if dt > 0 {
-			du := up - e.lastUploadBytes
-			dd := down - e.lastDownloadBytes
-			if du < 0 {
-				du = 0
-			}
-			if dd < 0 {
-				dd = 0
-			}
-			e.uploadSpeedBps = int64(float64(du) / dt)
-			e.downloadSpeedBps = int64(float64(dd) / dt)
-		}
-	}
-	e.lastUploadBytes = up
-	e.lastDownloadBytes = down
+	e.uploadSpeedBps = up
+	e.downloadSpeedBps = down
+	e.lastUploadBytes += up
+	e.lastDownloadBytes += down
 	e.lastSampleTime = now
 	e.tunnelPingMs = ping
 	e.appendSpeedSampleLocked(e.uploadSpeedBps, e.downloadSpeedBps)

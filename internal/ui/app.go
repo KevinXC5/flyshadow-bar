@@ -194,9 +194,15 @@ func (a *App) onReady(opts RunOptions) {
 	if a.updates != nil {
 		a.updates.availableFn = func(st UpdateStatus) {
 			mygo.RunOnMain(func() {
+				if a.updateProgressReset != nil {
+					a.updateProgressReset()
+				}
 				if a.vm != nil {
 					a.vm.applyNativeUpdateStatus(st)
 					a.vm.updateDownloading = true
+					a.vm.updateDownloaded = 0
+					a.vm.updateTotal = 0
+					a.vm.updateErr = ""
 				}
 				if a.win != nil && a.win.IsVisible() {
 					a.win.Invalidate()
@@ -356,6 +362,10 @@ func (a *App) showWindow() {
 	a.ensureWindow()
 	if a.win == nil {
 		return
+	}
+	// 弹出主面板时立即向系统核对代理真实状态，防止外部清空后开关仍停留在旧状态
+	if a.eng != nil {
+		go a.eng.RefreshSystemProxy()
 	}
 	a.win.Restore()
 	a.win.Show()

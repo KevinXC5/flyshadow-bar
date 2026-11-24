@@ -112,27 +112,52 @@ func TestMainViewRendersCleanly(t *testing.T) {
 		t.Fatalf("rules tab did not render expected rule, activeTab=%d", vm.activeTab)
 	}
 
-	// 切换到连接页验证渲染
+	// 切换到连接页验证渲染与快捷添加规则提示
 	if err := tt.Click("连接"); err != nil {
 		t.Fatalf("click 连接: %v", err)
 	}
-	if vm.activeTab != 2 || !tt.HasText("api.openai.com:443") {
-		t.Fatalf("connections tab did not render expected connection, activeTab=%d", vm.activeTab)
+	if vm.activeTab != 2 || !tt.HasText("api.openai.com:443") || !tt.HasText("可直接点击直连/代理按钮快速添加规则") {
+		t.Fatalf("connections tab did not render expected connection/hint, activeTab=%d texts=%v", vm.activeTab, tt.Texts())
 	}
 
-	// 切换到设置页验证渲染
+	// 切换到设置页验证渲染（关于与更新不再重复展示订阅流量）
 	if err := tt.Click("设置"); err != nil {
 		t.Fatalf("click 设置: %v", err)
 	}
 	if vm.activeTab != 3 || !tt.HasText("代理端口") {
 		t.Fatalf("settings tab did not render expected content, activeTab=%d", vm.activeTab)
 	}
+	if tt.HasText("订阅流量") {
+		t.Fatalf("settings tab should not duplicate 订阅流量 row, texts=%v", tt.Texts())
+	}
+
+	// 验证 Markdown 更新说明渲染与更新下载进度条
+	vm.updateNativeEnabled = true
+	vm.updateAvailable = "0.2.6"
+	vm.updateNotes = "# FlyShadow Bar v0.2.6 更新说明\n\n#### 新增功能\n- 新增 `--relaunch` 启动标志\n"
+	vm.updateDownloading = true
+	vm.updateDownloaded = 1536 * 1024
+	vm.updateTotal = 3072 * 1024
+	ttUpdating := ui.NewTester(vm.render, 500, 960)
+	if !ttUpdating.HasText("正在下载 0.2.6") || !ttUpdating.HasText("50%") {
+		t.Fatalf("update progress banner/section missing expected text, got: %v", ttUpdating.Texts())
+	}
+	if _, ok := ttUpdating.Access("更新下载进度"); !ok {
+		t.Fatalf("expected accessible progress bar 更新下载进度")
+	}
+	if !ttUpdating.HasText("FlyShadow Bar v0.2.6 更新说明") || !ttUpdating.HasText("新增功能") {
+		t.Fatalf("markdown release notes did not render expected headings, got: %v", ttUpdating.Texts())
+	}
+	if ttUpdating.HasText("#### 新增功能") || ttUpdating.HasText("# FlyShadow Bar") {
+		t.Fatalf("raw markdown markers should not appear verbatim, got: %v", ttUpdating.Texts())
+	}
 
 	// 验证后台增量更新就绪后顶部醒目「立即重启」横幅渲染
+	vm.updateDownloading = false
 	vm.updateInstalled = true
-	vm.updateAvailable = "0.2.2"
+	vm.updateAvailable = "0.2.6"
 	ttReady := ui.NewTester(vm.render, 500, 780)
-	if !ttReady.HasText("新版本 0.2.2 已就绪") || !ttReady.HasText("立即重启") {
+	if !ttReady.HasText("新版本 0.2.6 已就绪") || !ttReady.HasText("立即重启") {
 		t.Fatalf("update ready banner missing expected text, got: %v", ttReady.Texts())
 	}
 
@@ -179,6 +204,36 @@ func TestDarwinTrayIconIsPureMonochromeTemplate(t *testing.T) {
 			t.Fatalf("darwin tray icon (connected=%v) has no visible pixels", connected)
 		}
 	}
+	// 验证 macOS 双行网速菜单栏模板图：严格纯黑透明像素（RGB=0），且两次不同速率渲染出的像素有变化
+	rawSpeed1 := makeDarwinTraySpeedIconPNG(true, 23*1024, 3686)
+	rawSpeed2 := makeDarwinTraySpeedIconPNG(true, 1024*1024*5, 1024*1024*18)
+	if bytes.Equal(rawSpeed1, rawSpeed2) {
+		t.Fatalf("darwin speed tray icon did not redraw for updated speed values")
+	}
+	imgSpeed, err := png.Decode(bytes.NewReader(rawSpeed1))
+	if err != nil {
+		t.Fatalf("decode darwin speed tray icon: %v", err)
+	}
+	sb := imgSpeed.Bounds()
+	if sb.Dy() != 36 || sb.Dx() <= 36 || sb.Dx() > 140 {
+		t.Fatalf("unexpected darwin speed tray icon dimensions: %dx%d", sb.Dx(), sb.Dy())
+	}
+	speedVisible := 0
+	for y := sb.Min.Y; y < sb.Max.Y; y++ {
+		for x := sb.Min.X; x < sb.Max.X; x++ {
+			r, g, bl, a := imgSpeed.At(x, y).RGBA()
+			if a > 0 {
+				speedVisible++
+				if r != 0 || g != 0 || bl != 0 {
+					t.Fatalf("darwin speed tray icon at (%d,%d) must be monochrome template (RGB=0), got RGBA=(%d,%d,%d,%d)",
+						x, y, r, g, bl, a)
+				}
+			}
+		}
+	}
+	if speedVisible == 0 {
+		t.Fatalf("darwin speed tray icon has no visible pixels")
+	}
 }
 
 func TestFormatHelpers(t *testing.T) {
@@ -190,6 +245,18 @@ func TestFormatHelpers(t *testing.T) {
 	}
 	if got := FormatSpeed(3 * 1024 * 1024); got != "3.00 MB/s" {
 		t.Fatalf("FormatSpeed(3MB) = %q", got)
+	}
+	if got := FormatTraySpeed(0); got != "0B" {
+		t.Fatalf("FormatTraySpeed(0) = %q", got)
+	}
+	if got := FormatTraySpeed(3686); got != "3.6K" {
+		t.Fatalf("FormatTraySpeed(3686) = %q", got)
+	}
+	if got := FormatTraySpeed(23 * 1024); got != "23K" {
+		t.Fatalf("FormatTraySpeed(23K) = %q", got)
+	}
+	if got := FormatTraySpeed(5 * 1024 * 1024); got != "5.0M" {
+		t.Fatalf("FormatTraySpeed(5M) = %q", got)
 	}
 	if got := FormatDelay(48, false); got != "48 ms" {
 		t.Fatalf("FormatDelay(48) = %q", got)

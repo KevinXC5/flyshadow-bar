@@ -144,8 +144,14 @@ func (m *darwinManager) disableService(service string) error {
 	return nil
 }
 
-// IsEnabled 检查是否存在有效网络服务已开启匹配的 Web 系统代理。
+// IsEnabled 检查当前生效的系统代理是否已开启并指向目标主机与端口。
+// 优先使用单次 `scutil --proxy` 读取活跃网络接口的实际生效状态，避免离线接口残留配置造成误判；
+// 若 scutil 不可用则回退至 networksetup 逐服务查询。
 func (m *darwinManager) IsEnabled(host string, port int) (bool, error) {
+	if out, err := m.run("scutil", "--proxy"); err == nil {
+		return matchScutilProxy(parseScutilProxyOutput(out), host, port), nil
+	}
+
 	services, err := m.listServices()
 	if err != nil {
 		return false, err

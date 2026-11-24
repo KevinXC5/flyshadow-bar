@@ -93,6 +93,65 @@ func TestMatchWindowsProxyServer(t *testing.T) {
 	}
 }
 
+func TestParseScutilProxyOutputAndMatch(t *testing.T) {
+	enabledOut := `<dictionary> {
+  ExceptionsList : <array> {
+    0 : 127.0.0.1
+    1 : localhost
+    2 : *.local
+  }
+  ExcludeSimpleHostnames : 0
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7890
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 7890
+  SOCKSProxy : 127.0.0.1
+}
+`
+	info := parseScutilProxyOutput(enabledOut)
+	if !matchScutilProxy(info, "127.0.0.1", 7890) {
+		t.Fatalf("scutil 启用状态应匹配 127.0.0.1:7890, got=%+v", info)
+	}
+	if matchScutilProxy(info, "127.0.0.1", 7891) {
+		t.Fatalf("端口不同不应匹配")
+	}
+	if matchScutilProxy(info, "192.168.1.2", 7890) {
+		t.Fatalf("主机不同不应匹配")
+	}
+
+	// 系统代理被清空后应返回 false
+	clearedOut := `<dictionary> {
+  ExceptionsList : <array> {
+    0 : *.local
+  }
+  FTPPassive : 1
+  HTTPEnable : 0
+  HTTPSEnable : 0
+  SOCKSEnable : 0
+}
+`
+	cleared := parseScutilProxyOutput(clearedOut)
+	if matchScutilProxy(cleared, "127.0.0.1", 7890) {
+		t.Fatalf("系统代理已清空时不应匹配, got=%+v", cleared)
+	}
+
+	// 仅 HTTPS 代理匹配时也应识别为开启
+	httpsOnlyOut := `<dictionary> {
+  HTTPEnable : 0
+  HTTPSEnable : 1
+  HTTPSPort : 7890
+  HTTPSProxy : 127.0.0.1
+}
+`
+	if !matchScutilProxy(parseScutilProxyOutput(httpsOnlyOut), "127.0.0.1", 7890) {
+		t.Fatalf("仅 HTTPS 匹配时应返回 true")
+	}
+}
+
 func TestValidateProxyTarget(t *testing.T) {
 	if _, err := validateProxyTarget("", 7890); err == nil {
 		t.Fatalf("空主机应返回错误")

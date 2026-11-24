@@ -66,6 +66,13 @@ func makeTrayIconPNG(connected bool) []byte {
 //     配合 IconIsTemplate=true 由系统自动按浅/深菜单栏渲染为纯黑或纯白色；
 //   - Windows 等平台：使用高对比度冰青蓝双翼 + 翡翠绿连接状态点，深浅任务栏均清晰醒目。
 func makeTrayIconPNGForOS(connected bool, goos string) []byte {
+	img := renderTrayIconImage(connected, goos)
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img)
+	return buf.Bytes()
+}
+
+func renderTrayIconImage(connected bool, goos string) *image.NRGBA {
 	const size = 36
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 
@@ -163,8 +170,101 @@ func makeTrayIconPNGForOS(connected bool, goos string) []byte {
 		}
 	}
 
+	return img
+}
+
+var (
+	darwinTrayBaseOnce  sync.Once
+	darwinTrayBaseConn  *image.NRGBA
+	darwinTrayBaseIdle  *image.NRGBA
+	traySpeedRenderLock sync.Mutex
+	traySpeedTester     *ui.Tester
+	traySpeedUpText     string
+	traySpeedDownText   string
+)
+
+// makeDarwinTraySpeedIconPNG 生成 macOS 菜单栏专用的双行紧凑网速模板图（@2x Retina，18pt 高）：
+// 左侧为纯黑双翼飞标，右侧为上下两行紧凑速率（上行 ↑、下行 ↓，箭头左对齐、数值右对齐），
+// 全图严格仅含纯黑透明像素（RGB=0），供 NSStatusItem template 模式随浅/深菜单栏自动切换黑白色。
+func makeDarwinTraySpeedIconPNG(connected bool, upBps, downBps int64) []byte {
+	darwinTrayBaseOnce.Do(func() {
+		darwinTrayBaseConn = renderTrayIconImage(true, "darwin")
+		darwinTrayBaseIdle = renderTrayIconImage(false, "darwin")
+	})
+	baseIcon := darwinTrayBaseIdle
+	if connected {
+		baseIcon = darwinTrayBaseConn
+	}
+
+	const (
+		iconW    = 36 // 18pt @2x
+		iconH    = 36 // 18pt @2x
+		textDipW = 36 // 紧凑双行文字区宽度（pt），整体约 54pt 宽
+		textDipH = 18 // 菜单栏图标高度（pt）
+		scale    = 2
+		textPxW  = textDipW * scale
+		totalPxW = iconW + textPxW
+		totalPxH = iconH
+	)
+
+	upVal := FormatTraySpeed(upBps)
+	downVal := FormatTraySpeed(downBps)
+
+	traySpeedRenderLock.Lock()
+	traySpeedUpText = upVal
+	traySpeedDownText = downVal
+	if traySpeedTester == nil {
+		traySpeedTester = ui.NewTester(func(c *ui.Context) {
+			white := ui.Hex("#ffffff")
+			black := ui.Hex("#000000")
+			ui.Column(c).Size(textDipW, textDipH).Background(white).
+				Justify(ui.Center).AlignItems(ui.Stretch).Gap(0).Padding(0, 1, 0, 1).Children(func() {
+				ui.Row(c).Height(8.5).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, "↑").FontSize(7.5).Bold().LineHeight(8.5).TextColor(black).NoWrap()
+					ui.Spacer(c)
+					ui.Text(c, traySpeedUpText).FontSize(8.2).Bold().LineHeight(8.5).TextColor(black).NoWrap()
+				})
+				ui.Row(c).Height(8.5).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, "↓").FontSize(7.5).Bold().LineHeight(8.5).TextColor(black).NoWrap()
+					ui.Spacer(c)
+					ui.Text(c, traySpeedDownText).FontSize(8.2).Bold().LineHeight(8.5).TextColor(black).NoWrap()
+				})
+			})
+		}, textDipW, textDipH)
+		traySpeedTester.SetScale(scale)
+	} else {
+		traySpeedTester.Frame()
+	}
+	textImg := traySpeedTester.Image()
+	traySpeedRenderLock.Unlock()
+
+	out := image.NewNRGBA(image.Rect(0, 0, totalPxW, totalPxH))
+	// 拷贝左侧双翼模板图标
+	for y := 0; y < iconH; y++ {
+		for x := 0; x < iconW; x++ {
+			out.SetNRGBA(x, y, baseIcon.NRGBAAt(x, y))
+		}
+	}
+	// 将白底黑字抗锯齿结果转为严格纯黑透明模板像素（R=0, G=0, B=0, A=255-gray）
+	tb := textImg.Bounds()
+	for y := 0; y < totalPxH && y < tb.Dy(); y++ {
+		for x := 0; x < textPxW && x < tb.Dx(); x++ {
+			c := textImg.RGBAAt(tb.Min.X+x, tb.Min.Y+y)
+			// 灰度越小表示前景越黑，反相作为模板 Alpha；过滤极浅底噪
+			gray := (int(c.R)*299 + int(c.G)*587 + int(c.B)*114 + 500) / 1000
+			alpha := 255 - gray
+			if alpha < 12 {
+				continue
+			}
+			if alpha > 255 {
+				alpha = 255
+			}
+			out.SetNRGBA(iconW+x, y, color.NRGBA{R: 0, G: 0, B: 0, A: uint8(alpha)})
+		}
+	}
+
 	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
+	_ = png.Encode(&buf, out)
 	return buf.Bytes()
 }
 

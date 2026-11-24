@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
@@ -476,5 +477,71 @@ func TestEngineSetSubscribePasswordVerifyBeforeSave(t *testing.T) {
 	}
 	if reloaded.SubscribePassword != "valid-mock-pw" {
 		t.Fatalf("saved subscribePassword = %q, want valid-mock-pw", reloaded.SubscribePassword)
+	}
+	if got := eng.SubscribePassword(); got != "valid-mock-pw" {
+		t.Fatalf("SubscribePassword() = %q, want valid-mock-pw", got)
+	}
+}
+
+func TestEngineRefreshSystemProxyAndDirectSpeedSampling(t *testing.T) {
+	cfgPath := writeTestConfig(t)
+	mc := &mockCore{upload: 128000, download: 5 * 1024 * 1024}
+	sp := &mockSysProxy{}
+
+	eng, err := New(Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          mc,
+		SysProxy:            sp,
+		DisableAutoSysProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	if err := eng.Start(true); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// 开启系统代理后，模拟外部进程清空系统代理
+	if err := eng.SetSystemProxy(true); err != nil {
+		t.Fatalf("SetSystemProxy(true): %v", err)
+	}
+	if !eng.Snapshot().SystemProxy {
+		t.Fatalf("expected SystemProxy=true")
+	}
+
+	var notified bool
+	var mu sync.Mutex
+	unsub := eng.Subscribe(func(s Snapshot) {
+		mu.Lock()
+		if !s.SystemProxy {
+			notified = true
+		}
+		mu.Unlock()
+	})
+	defer unsub()
+
+	// 外部清空系统代理
+	_ = sp.Disable()
+	if got := eng.RefreshSystemProxy(); got {
+		t.Fatalf("RefreshSystemProxy() = true, want false after external disable")
+	}
+	if eng.Snapshot().SystemProxy {
+		t.Fatalf("Snapshot().SystemProxy should be false after RefreshSystemProxy")
+	}
+	mu.Lock()
+	wasNotified := notified
+	mu.Unlock()
+	if !wasNotified {
+		t.Fatalf("expected subscriber notification when system proxy changed externally")
+	}
+
+	// 验证速率采样直接使用核心库返回的每秒字节数，而非前后两次读数相减导致归零
+	eng.sampleStats(time.Now())
+	eng.sampleStats(time.Now().Add(time.Second))
+	snap := eng.Snapshot()
+	if snap.DownloadSpeedBps != 5*1024*1024 || snap.UploadSpeedBps != 128000 {
+		t.Fatalf("speed sampling mismatch: down=%d up=%d", snap.DownloadSpeedBps, snap.UploadSpeedBps)
 	}
 }

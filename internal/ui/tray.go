@@ -20,6 +20,7 @@ type trayController struct {
 	menu           *mygo.Menu
 	lastNodeSig    string
 	lastConnected  bool
+	lastSpeedKey   string
 	hasInitialized bool
 	iconConnected  []byte
 	iconIdle       []byte
@@ -74,7 +75,7 @@ func newTrayController(app *App) (*trayController, error) {
 			tc.popUpContextMenu()
 		})
 	}
-	tc.syncTitle(snap)
+	tc.syncDarwinVisual(snap)
 	return tc, nil
 }
 
@@ -102,17 +103,20 @@ func (tc *trayController) Update(snap engine.Snapshot) {
 	}
 
 	connected := snap.State == engine.StateConnected
-	if !tc.hasInitialized || connected != tc.lastConnected {
-		tc.lastConnected = connected
-		if connected {
-			tc.tray.SetIcon(tc.iconConnected, runtime.GOOS == "darwin")
-		} else {
-			tc.tray.SetIcon(tc.iconIdle, runtime.GOOS == "darwin")
+	if runtime.GOOS != "darwin" {
+		if !tc.hasInitialized || connected != tc.lastConnected {
+			tc.lastConnected = connected
+			if connected {
+				tc.tray.SetIcon(tc.iconConnected, false)
+			} else {
+				tc.tray.SetIcon(tc.iconIdle, false)
+			}
 		}
+	} else {
+		tc.syncDarwinVisual(snap)
 	}
 
 	tc.tray.SetToolTip(trayTooltip(snap))
-	tc.syncTitle(snap)
 
 	// 若节点列表或更新提示发生变化，重建菜单；否则增量更新避免打断用户浏览菜单
 	sig := tc.menuSignature(snap)
@@ -129,15 +133,37 @@ func (tc *trayController) Update(snap engine.Snapshot) {
 	tc.patchMenuInPlace(snap)
 }
 
-func (tc *trayController) syncTitle(snap engine.Snapshot) {
-	if runtime.GOOS != "darwin" {
+// syncDarwinVisual 统一管理 macOS 菜单栏的纯黑模板图标与双行紧凑网速渲染：
+// 开启「菜单栏显示网速」且已连接时，将飞标与上下两行速率合成为一张窄幅纯黑模板图，
+// 避免单行标题占用过多菜单栏空间；关闭或断开时恢复标准单图标。
+func (tc *trayController) syncDarwinVisual(snap engine.Snapshot) {
+	if runtime.GOOS != "darwin" || tc.tray == nil {
 		return
 	}
-	if !tc.app.prefs.ShowTraySpeed || snap.State != engine.StateConnected {
-		tc.tray.SetTitle("")
+	connected := snap.State == engine.StateConnected
+	showSpeed := tc.app.prefs.ShowTraySpeed && connected
+	if !showSpeed {
+		if tc.lastSpeedKey != "" || !tc.hasInitialized || connected != tc.lastConnected {
+			tc.lastSpeedKey = ""
+			tc.lastConnected = connected
+			tc.tray.SetTitle("")
+			if connected {
+				_ = tc.tray.SetIcon(tc.iconConnected, true)
+			} else {
+				_ = tc.tray.SetIcon(tc.iconIdle, true)
+			}
+		}
 		return
 	}
-	tc.tray.SetTitle("↓" + FormatCompactSpeed(snap.DownloadSpeedBps) + " ↑" + FormatCompactSpeed(snap.UploadSpeedBps))
+
+	speedKey := FormatTraySpeed(snap.UploadSpeedBps) + "|" + FormatTraySpeed(snap.DownloadSpeedBps)
+	if speedKey == tc.lastSpeedKey && connected == tc.lastConnected {
+		return
+	}
+	tc.lastSpeedKey = speedKey
+	tc.lastConnected = connected
+	tc.tray.SetTitle("")
+	_ = tc.tray.SetIcon(makeDarwinTraySpeedIconPNG(connected, snap.UploadSpeedBps, snap.DownloadSpeedBps), true)
 }
 
 func (tc *trayController) patchMenuInPlace(snap engine.Snapshot) {

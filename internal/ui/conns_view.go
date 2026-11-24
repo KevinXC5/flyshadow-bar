@@ -35,13 +35,15 @@ func (vm *viewModel) renderConnectionsView(c *ui.Context, p palette) {
 
 	filtered := vm.filteredConnections()
 
-	// 2. 状态摘要行（未筛选时只显示总数，避免重复）
-	ui.Row(c).AlignItems(ui.Center).Padding(0, 2).Children(func() {
+	// 2. 状态摘要行（未筛选时只显示总数，右侧提示快捷添加规则操作）
+	ui.Row(c).AlignItems(ui.Center).Gap(8).Padding(0, 2).Children(func() {
 		summary := fmt.Sprintf("共 %d 条连接", len(vm.connections))
 		if len(filtered) != len(vm.connections) {
 			summary = fmt.Sprintf("显示 %d / %d 条连接", len(filtered), len(vm.connections))
 		}
-		ui.Text(c, summary).FontSize(11).TextColor(p.textMuted)
+		ui.Text(c, summary).FontSize(11).TextColor(p.textMuted).NoWrap()
+		ui.Spacer(c)
+		ui.Text(c, "可直接点击直连/代理按钮快速添加规则").FontSize(10.5).TextColor(p.textMuted).Ellipsis("…")
 	})
 
 	// 3. 连接列表（右侧独立细滚动条槽道）

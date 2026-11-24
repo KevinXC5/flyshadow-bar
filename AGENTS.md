@@ -44,6 +44,7 @@
 
 - `new_proxy(tc)` 传入的是 `tunnel_context`（`tc`），不是 `rt`。
 - `get_tunnel_status(rt, tc) == 0` 表示已连接成功，非 `0` 表示未连接或连接中。
+- `get_tunnel_upload(rt, tc)` 与 `get_tunnel_download(rt, tc)` 在 1 秒采样周期下直接返回当前每秒上下行字节数（Bytes/s），与官方客户端行为一致，严禁对相邻两次读数做差值相减。
 - `set_geoip(rt, tc, "CN", dataPtr, len)` 固定使用国家码 `"CN"` 加载 `Country-only-cn-private.mmdb`。
 - `start_proxy`（`allowLanConnection=true`）、`start_proxy_ip("127.0.0.1", ...)`（`false`）、`get_version`、`get_tunnel_mapper_info_json` 返回的 C 字符串必须调用 `free_string` 释放；指针转换必须通过 `go vet`（双平台不得出现 `unsafeptr` 警告）。
 - `close_connect` 的连接键格式固定为 `source_addr:source_port===protocol`。

@@ -211,6 +211,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	s.eng.RefreshSystemProxy()
 	writeJSON(w, http.StatusOK, s.eng.Snapshot())
 }
 

@@ -100,6 +100,69 @@ func matchWebProxy(info webProxyInfo, host string, port int) bool {
 	return strings.EqualFold(strings.TrimSpace(info.Server), expectedHost)
 }
 
+// scutilProxyInfo 表示从 macOS scutil --proxy 输出解析出的当前生效代理配置。
+type scutilProxyInfo struct {
+	HTTP  webProxyInfo
+	HTTPS webProxyInfo
+	SOCKS webProxyInfo
+}
+
+// parseScutilProxyOutput 解析 macOS `scutil --proxy` 输出的顶层字典键值。
+func parseScutilProxyOutput(output string) scutilProxyInfo {
+	var info scutilProxyInfo
+	depth := 0
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		opens := strings.Count(line, "{")
+		closes := strings.Count(line, "}")
+		if depth == 1 && opens == 0 {
+			if key, val, ok := strings.Cut(line, ":"); ok {
+				key = strings.TrimSpace(key)
+				val = strings.TrimSpace(val)
+				switch key {
+				case "HTTPEnable":
+					info.HTTP.Enabled = val == "1"
+				case "HTTPProxy":
+					info.HTTP.Server = val
+				case "HTTPPort":
+					if p, err := strconv.Atoi(val); err == nil {
+						info.HTTP.Port = p
+					}
+				case "HTTPSEnable":
+					info.HTTPS.Enabled = val == "1"
+				case "HTTPSProxy":
+					info.HTTPS.Server = val
+				case "HTTPSPort":
+					if p, err := strconv.Atoi(val); err == nil {
+						info.HTTPS.Port = p
+					}
+				case "SOCKSEnable":
+					info.SOCKS.Enabled = val == "1"
+				case "SOCKSProxy":
+					info.SOCKS.Server = val
+				case "SOCKSPort":
+					if p, err := strconv.Atoi(val); err == nil {
+						info.SOCKS.Port = p
+					}
+				}
+			}
+		}
+		depth += opens - closes
+		if depth < 0 {
+			depth = 0
+		}
+	}
+	return info
+}
+
+// matchScutilProxy 判断当前生效的 macOS 系统代理（HTTP 或 HTTPS）是否指向期望主机和端口。
+func matchScutilProxy(info scutilProxyInfo, host string, port int) bool {
+	return matchWebProxy(info.HTTP, host, port) || matchWebProxy(info.HTTPS, host, port)
+}
+
 // matchWindowsProxyServer 判断 Windows 注册表中的 ProxyServer 字段是否匹配目标主机和端口。
 // 兼容 "host:port"、"http://host:port" 以及 "http=host:port;https=host:port" 等格式。
 func matchWindowsProxyServer(proxyServer, host string, port int) bool {
