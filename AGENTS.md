@@ -84,7 +84,7 @@
    - `prepare`：校验标签格式与 `origin/main` 祖先关系；收集自上一个已公开标签以来的提交记录（排除 `docs/screenshots`、`README.md` 与 `AGENTS.md`），调用 DeepSeek API（`deepseek-v4-flash`）结合 `.github/release-notes.md` 生成面向用户的简体中文更新日志，创建 Draft Release。
    - `check`：在 `ubuntu-latest` 运行 `CGO_ENABLED=0 go test -v ./...` 及 `darwin/arm64`、`darwin/amd64`、`windows/amd64` 三目标 `go vet`。
    - `build` 矩阵：
-     - `macos-latest`（注意：`macos-14` 运行器已退役，勿回退）执行 `go tool mygo build -platform darwin/arm64,darwin/amd64 -skip-notarize`，生成 Apple Silicon / Intel 双架构 `.dmg`、签名 `.tar.gz`、最近 3 个版本的 `.delta` 增量补丁与 `update-darwin-{arm64,amd64}.json`；
+     - `macos-15`（注意：`macos-14` 运行器已退役，`macos-latest` 队列易拥堵，固定使用 `macos-15`）执行 `go tool mygo build -platform darwin/arm64,darwin/amd64 -skip-notarize`，生成 Apple Silicon / Intel 双架构 `.dmg`、签名 `.tar.gz`、最近 3 个版本的 `.delta` 增量补丁与 `update-darwin-{arm64,amd64}.json`；
      - `ubuntu-latest` 安装 `nsis` 后执行 `go tool mygo build -platform windows/amd64`，生成 Windows `setup` 安装器、签名 `.tar.gz`、`.delta` 增量补丁与 `update-windows-amd64.json`；
      - 先上传安装包、归档与增量补丁，再上传 `update-*.json` 更新清单。
    - `publish`：下载草稿内全部产物，校验 3 份 `update-*.json`、2 份 macOS `.dmg`、Windows `setup` 安装器以及清单引用的全部归档与 `.delta` 文件大小和签名，输出完整包与增量包体积统计，生成并上传 `checksums.txt`，最后取消草稿并设为 `latest`。
