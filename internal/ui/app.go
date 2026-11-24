@@ -22,6 +22,7 @@ type RunOptions struct {
 	ConfigPath          string
 	CoreLibPath         string
 	StartHidden         bool
+	ShowOnceOnStart     bool
 	NoConnect           bool
 	DisableAutoSysProxy bool
 }
@@ -86,8 +87,10 @@ func Run(opts RunOptions) error {
 	app.updates = newUpdateManager(func() {
 		mygo.RunOnMain(func() {
 			app.quitting = true
-			app.cleanup()
-			mygo.App.Relaunch()
+			// 先挂起脱离当前进程组的 macOS 重启看门狗，再交由 MyGo 正常走完退出、换包与拉起流程
+			// （cleanup 由 OnWillQuit / OnQuit 统一执行，避免提前清理干扰退出事件循环）
+			armRelaunchWatchdog("--relaunch")
+			mygo.App.Relaunch("--relaunch")
 		})
 	})
 
@@ -145,11 +148,17 @@ func (a *App) onReady(opts RunOptions) {
 	}
 
 	// 启动默认静默驻留菜单栏 / 系统托盘，不提前创建主窗口；
-	// 仅在显式传 --show 且非开机自启时立即弹出。
+	// 仅在显式传 --show（钉住窗口）或 --relaunch（更新重启后弹出一次，失焦仍自动收起）时立即弹窗。
 	hidden := opts.StartHidden || mygo.App.WasOpenedAtLogin()
 	if !hidden {
 		a.pinWindow = true
 		a.ensureWindow()
+		a.showWindow()
+	} else if opts.ShowOnceOnStart {
+		a.ensureWindow()
+		if a.vm != nil && version.Version != "" && version.Version != "dev" {
+			a.vm.toastMsg = "已更新至 " + version.Version
+		}
 		a.showWindow()
 	}
 

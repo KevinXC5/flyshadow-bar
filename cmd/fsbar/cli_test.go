@@ -13,6 +13,7 @@ func TestIsGUILaunch(t *testing.T) {
 		{"--gui"},
 		{"--hidden"},
 		{"--show"},
+		{"--relaunch"},
 		{"--config", "/tmp/c.json"},
 		{"--config=/tmp/c.json"},
 		{"--core-lib=/tmp/lib.dylib"},
