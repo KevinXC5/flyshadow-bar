@@ -101,6 +101,14 @@ func TestMainViewRendersCleanly(t *testing.T) {
 		t.Fatalf("settings tab did not render expected content, activeTab=%d", vm.activeTab)
 	}
 
+	// 验证后台增量更新就绪后顶部醒目「重启更新」横幅渲染
+	vm.updateInstalled = true
+	vm.updateAvailable = "0.2.2"
+	ttReady := ui.NewTester(vm.render, 500, 780)
+	if !ttReady.HasText("新版本 0.2.2 已下载就绪") || !ttReady.HasText("重启更新") {
+		t.Fatalf("update ready banner missing expected text, got: %v", ttReady.Texts())
+	}
+
 	// 验证图标 PNG 生成有效
 	pngConn := makeTrayIconPNG(true)
 	pngIdle := makeTrayIconPNG(false)

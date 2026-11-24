@@ -19,7 +19,9 @@
 ## 架构与构建约束
 
 - **全程零 CGO（`CGO_ENABLED=0`）**：所有构建、测试与交叉编译必须保持 `CGO_ENABLED=0`，不得引入 C 源码、CGO 依赖或需要 C 编译器的库；确保可跨架构构建 `darwin/arm64`、`darwin/amd64` 与 `windows/amd64`。
-- **纯 Go 原生 GPU UI 与 MyGo 打包**：桌面端基于 `github.com/egoist/mygo`（macOS Metal / Windows Direct3D 11）与原生系统托盘实现，严禁引入 Electron、WebView、Node.js 或网页前端构建链。MyGo CLI 由 `go.mod` 的 `tool` 指令固定，通过 `go tool mygo` 调用，打包与增量更新元数据配置在 `mygo.json`。正式版本号由发版流程从 Git 标签注入 `mygo.json`，仓库内 `mygo.json` 的 `version` 仅用于本地开发构建。
+- **纯 Go 原生 GPU UI 与 MyGo 打包**：桌面端基于 `github.com/egoist/mygo`（macOS Metal / Windows Direct3D 11）与原生系统托盘实现，严禁引入 Electron、WebView、Node.js 或网页前端构建链。MyGo CLI 由 `go.mod` 的 `tool` 指令固定，通过 `go tool mygo` 调用，应用图标（`resources/icon.png`，通过 `resourcesExclude` 排除冗余原图拷贝）、打包与增量更新元数据配置在 `mygo.json`。正式版本号由发版流程从 Git 标签注入 `mygo.json`，仓库内 `mygo.json` 的 `version` 仅用于本地开发构建。
+- **菜单栏 / 托盘弹窗与跨平台一致性**：启动默认静默驻留托盘并按需懒创建主窗口（仅传 `--show` 时启动弹窗）；主窗口使用 `TitleBarStyle: mygo.TitleBarHidden` + `HideWindowButtons: true` + `SkipTaskbar: true` + `AlwaysOnTop: true`（在 macOS 隐藏红绿灯、在 Windows 隐藏标题按钮的同时保留双端原生圆角与阴影），点击托盘图标在图标附近弹出/收起，支持 `Esc` 与失焦自动收起（连接监控页、更新下载中及 `--show` 模式不自动收起）；macOS 保持常驻 `Menu: nil` 并在 `OnRightClick` 临时弹出快捷菜单，Windows 保持 `Menu` 绑定且 `OnClick` 弹窗，确保双端左键弹窗、右键菜单行为完全一致。
+- **自动静默增量更新**：`internal/ui/updates.go` 在启动 5 秒后首次检查并每 30 分钟周期性静默检查，发现新版本后自动在后台下载并安装签名 `.delta` 补丁，安装就绪后通过弹窗顶部醒目横幅（`renderUpdateReadyBanner`）与托盘菜单提示一键重启生效。
 - **切勿覆盖 `mygo.App.Version()`**：`mygo build` 通过 `-ldflags` 注入当前版本号供 `mygo.Updater` 匹配增量补丁；启动时仅在 `mygo.App.Version()` 为空或 `"0.0.0"` 时才回退调用 `mygo.App.SetVersion`。
 - **单二进制双形态（CLI 名称 `fsbar`）**：入口位于 `cmd/fsbar/`，无参数或仅带 GUI 标志（`--gui`/`--hidden`/`--config`/`--core-lib`/`--no-connect`/`--no-auto-sysproxy`/`-psn_*`）时启动常驻 GUI；携带子命令时通过本地回环 Bearer Token 控制接口（`~/.FlyShadow/flyshadow-bar.run.json`，权限 `0600`）与运行中实例通信，且所有子命令均支持 `fsbar help <子命令>` 与 `--help`。
 - **包职责划分**：

@@ -148,3 +148,36 @@ func TestDirUpdateSource(t *testing.T) {
 		t.Fatalf("Open 文件名映射异常: %q", string(b2))
 	}
 }
+
+func TestUpdateManagerAutoDownloadReady(t *testing.T) {
+	mgr := newUpdateManager(nil)
+	mgr.versionFn = func() string { return "0.2.0" }
+	mgr.enabledFn = func() bool { return true }
+	mgr.initialDelay = 10 * time.Millisecond
+	mgr.checkInterval = 20 * time.Millisecond
+	mgr.checkFn = func(context.Context) (*mygo.Update, error) {
+		return &mygo.Update{Version: "0.2.2", Notes: "### 0.2.2\n\n自动静默增量更新"}, nil
+	}
+	mgr.installFn = func(_ context.Context, _ *mygo.Update, progress func(int64, int64)) error {
+		progress(86000, 86000)
+		return nil
+	}
+
+	readyCh := make(chan UpdateStatus, 1)
+	mgr.readyFn = func(st UpdateStatus) {
+		readyCh <- st
+	}
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	mgr.StartBackground(stopCh)
+
+	select {
+	case st := <-readyCh:
+		if !st.Installed || st.Available != "0.2.2" {
+			t.Fatalf("自动增量安装状态异常: %+v", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("等待后台自动增量更新就绪超时")
+	}
+}

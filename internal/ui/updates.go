@@ -23,6 +23,8 @@ import (
 const (
 	updateProgressThrottle = 50 * time.Millisecond
 	updateIdleTimeout      = time.Minute
+	updateInitialDelay     = 5 * time.Second
+	updateCheckInterval    = 30 * time.Minute
 )
 
 // updateProgressNow 允许单测替换时钟。
@@ -62,10 +64,14 @@ type UpdateManager struct {
 	installFn func(context.Context, *mygo.Update, func(int64, int64)) error
 	restartFn func()
 
-	availableFn func(UpdateStatus)
-	progressFn  func(downloaded, total int64)
+	availableFn   func(UpdateStatus)
+	readyFn       func(UpdateStatus)
+	installFailFn func()
+	progressFn    func(downloaded, total int64)
 
-	idleTimeout time.Duration
+	idleTimeout   time.Duration
+	initialDelay  time.Duration
+	checkInterval time.Duration
 }
 
 func newUpdateManager(restartFn func()) *UpdateManager {
@@ -75,8 +81,10 @@ func newUpdateManager(restartFn func()) *UpdateManager {
 		}
 	}
 	return &UpdateManager{
-		restartFn:   restartFn,
-		idleTimeout: updateIdleTimeout,
+		restartFn:     restartFn,
+		idleTimeout:   updateIdleTimeout,
+		initialDelay:  updateInitialDelay,
+		checkInterval: updateCheckInterval,
 	}
 }
 
@@ -301,27 +309,79 @@ func (u *UpdateManager) Restart() error {
 	return nil
 }
 
-// StartBackground 在应用就绪后周期性静默检查更新（退出时随 stopCh 停止）。
+// StartBackground 在启动 5 秒后首次检查更新，之后每 30 分钟巡检一次；
+// 发现新版本后由于增量包极小，直接在后台静默完成增量下载与签名安装，就绪后通过 readyFn 提示重启。
 func (u *UpdateManager) StartBackground(stopCh <-chan struct{}) {
 	if !u.enabled() {
 		return
 	}
+	initDelay := u.initialDelay
+	if initDelay <= 0 {
+		initDelay = updateInitialDelay
+	}
+	interval := u.checkInterval
+	if interval <= 0 {
+		interval = updateCheckInterval
+	}
 	go func() {
-		timer := time.NewTimer(15 * time.Second)
+		timer := time.NewTimer(initDelay)
 		defer timer.Stop()
 		for {
 			select {
 			case <-stopCh:
 				return
 			case <-timer.C:
-				status, err := u.Check(context.Background())
-				if err == nil && status.Available != "" && !status.Installed && u.availableFn != nil {
-					u.availableFn(status)
+				if u.checkAndAutoInstall(stopCh) {
+					// 新版本已安装就绪，等待用户重启生效即可，无需继续轮询
+					return
 				}
-				timer.Reset(24 * time.Hour)
+				timer.Reset(interval)
 			}
 		}
 	}()
+}
+
+// checkAndAutoInstall 执行一轮静默检查，若发现新版本则自动后台下载安装增量更新。
+// 返回 true 表示更新已安装就绪。
+func (u *UpdateManager) checkAndAutoInstall(stopCh <-chan struct{}) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	status, err := u.Check(ctx)
+	if err != nil {
+		return false
+	}
+	if status.Installed {
+		if u.readyFn != nil {
+			u.readyFn(status)
+		}
+		return true
+	}
+	if status.Available == "" {
+		return false
+	}
+	if u.availableFn != nil {
+		u.availableFn(status)
+	}
+
+	installedStatus, err := u.Install(ctx)
+	if err != nil || !installedStatus.Installed {
+		if u.installFailFn != nil {
+			u.installFailFn()
+		}
+		return false
+	}
+	if u.readyFn != nil {
+		u.readyFn(installedStatus)
+	}
+	return true
 }
 
 // installWithTimeout 在下载长时间无字节进展时取消请求，避免卡死在慢连接上。

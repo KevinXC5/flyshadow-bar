@@ -158,7 +158,7 @@ func paletteFor(dark bool) palette {
 
 func (vm *viewModel) render(c *ui.Context) {
 	if vm.app != nil {
-		if c.Shortcut(ui.Cmd, ui.KeyW) {
+		if c.Shortcut(ui.Cmd, ui.KeyW) || c.Shortcut(0, ui.KeyEscape) {
 			vm.app.hideWindow()
 		}
 		c.OnShortcut(ui.Cmd, ui.KeyQ, mygo.App.Quit)
@@ -180,6 +180,9 @@ func (vm *viewModel) render(c *ui.Context) {
 	ui.Column(c).Fill().Background(p.canvas).Children(func() {
 		vm.renderTitleBar(c, p)
 		ui.Column(c).Grow(1).Padding(4, 14, 12, 14).Gap(9).Children(func() {
+			if vm.updateInstalled && vm.updateAvailable != "" {
+				vm.renderUpdateReadyBanner(c, p)
+			}
 			vm.renderCompactOverview(c, p)
 			switch vm.activeTab {
 			case 0:
@@ -213,6 +216,23 @@ func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 			if vm.activeTab == 2 && prevTab != 2 && vm.app != nil {
 				go vm.app.refreshConnections()
 			}
+		}
+	})
+}
+
+// renderUpdateReadyBanner 当后台静默增量更新安装完成后，在弹窗最醒目的顶部位置提示用户一键重启生效。
+func (vm *viewModel) renderUpdateReadyBanner(c *ui.Context, p palette) {
+	ui.Row(c).Padding(8, 12).Gap(10).Radius(11).AlignItems(ui.Center).
+		Background(p.successSoft).Border(1, p.success).Children(func() {
+		ui.Box(c).Size(8, 8).Radius(99).Background(p.success)
+		ui.Column(c).Grow(1).Gap(1).Children(func() {
+			ui.Text(c, fmt.Sprintf("新版本 %s 已下载就绪", vm.updateAvailable)).
+				FontSize(12.5).Bold().TextColor(p.success)
+			ui.Text(c, "增量更新已验签完成，重启后即可生效").
+				FontSize(10.5).TextColor(p.textSecondary)
+		})
+		if ui.PrimaryButton(c.Key("btn-banner-restart"), "重启更新").Padding(5, 12).Radius(7).Clicked() {
+			vm.restartForUpdate()
 		}
 	})
 }

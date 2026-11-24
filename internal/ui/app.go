@@ -37,10 +37,12 @@ type App struct {
 
 	updateProgressReset func()
 
-	quitting  bool
-	unsub     func()
-	stopCh    chan struct{}
-	closeOnce sync.Once
+	quitting     bool
+	pinWindow    bool // 显式 --show 启动时不随失焦自动收起
+	lastBlurHide time.Time
+	unsub        func()
+	stopCh       chan struct{}
+	closeOnce    sync.Once
 }
 
 // Run 启动单进程 GUI/托盘桌面应用，阻塞直至应用退出。
@@ -145,6 +147,7 @@ func (a *App) onReady(opts RunOptions) {
 	// 仅在显式传 --show 且非开机自启时立即弹出。
 	hidden := opts.StartHidden || mygo.App.WasOpenedAtLogin()
 	if !hidden {
+		a.pinWindow = true
 		a.ensureWindow()
 		a.showWindow()
 	}
@@ -174,17 +177,40 @@ func (a *App) onReady(opts RunOptions) {
 	// 仅在窗口打开且位于「连接」页时按需轮询活跃连接，平时零额外开销
 	go a.connectionsPollLoop()
 
-	// 绑定 MyGo 签名增量更新的后台通知与进度节流回调
+	// 绑定 MyGo 签名增量更新的后台自动巡检、静默下载与就绪回调
 	if a.updates != nil {
 		a.updates.availableFn = func(st UpdateStatus) {
 			mygo.RunOnMain(func() {
 				if a.vm != nil {
+					a.vm.applyNativeUpdateStatus(st)
+					a.vm.updateDownloading = true
+				}
+				if a.win != nil && a.win.IsVisible() {
+					a.win.Invalidate()
+				}
+				a.refreshTrayMenu()
+			})
+		}
+		a.updates.readyFn = func(st UpdateStatus) {
+			mygo.RunOnMain(func() {
+				if a.vm != nil {
+					a.vm.updateDownloading = false
 					a.vm.applyNativeUpdateStatus(st)
 				}
 				if a.win != nil && a.win.IsVisible() {
 					a.win.Invalidate()
 				}
 				a.refreshTrayMenu()
+			})
+		}
+		a.updates.installFailFn = func() {
+			mygo.RunOnMain(func() {
+				if a.vm != nil {
+					a.vm.updateDownloading = false
+				}
+				if a.win != nil && a.win.IsVisible() {
+					a.win.Invalidate()
+				}
 			})
 		}
 		fn, reset := newThrottledUpdateProgress(func(downloaded, total int64) {
@@ -212,16 +238,18 @@ func (a *App) ensureWindow() {
 		a.vm.snap = a.eng.Snapshot()
 	}
 	a.win = mygo.NewWindow(mygo.WindowOptions{
-		Title:         "FlyShadow Bar",
-		Width:         500,
-		Height:        780,
-		MinWidth:      440,
-		MinHeight:     580,
-		StateKey:      "main-v2",
-		Hidden:        true,
-		SkipTaskbar:   true,
-		TitleBarStyle: mygo.TitleBarHidden,
-		Content:       ui.View(a.vm.render),
+		Title:             "FlyShadow Bar",
+		Width:             500,
+		Height:            740,
+		MinWidth:          440,
+		MinHeight:         560,
+		StateKey:          "popover-v3",
+		Hidden:            true,
+		SkipTaskbar:       true,
+		AlwaysOnTop:       true,
+		TitleBarStyle:     mygo.TitleBarHidden,
+		HideWindowButtons: true,
+		Content:           ui.View(a.vm.render),
 	})
 
 	// 点击窗口关闭按钮时隐藏至托盘而非退出，仅在真正退出应用时放行关闭
@@ -231,6 +259,18 @@ func (a *App) ensureWindow() {
 			a.win.Hide()
 			a.refreshTrayMenu()
 		}
+	})
+	// 托盘弹窗体验：点击面板外部自动收起（在「连接」监控页、更新下载中或显式 --show 时保留不收起）
+	a.win.OnBlur(func() {
+		if a.quitting || a.pinWindow || a.win == nil || !a.win.IsVisible() {
+			return
+		}
+		if a.vm != nil && (a.vm.activeTab == 2 || a.vm.updateDownloading) {
+			return
+		}
+		a.lastBlurHide = time.Now()
+		a.win.Hide()
+		a.refreshTrayMenu()
 	})
 	a.win.OnShow(func() { a.refreshTrayMenu() })
 	a.win.OnHide(func() { a.refreshTrayMenu() })
@@ -332,6 +372,10 @@ func (a *App) toggleWindow() {
 func (a *App) toggleWindowFromTray() {
 	if a.isWindowVisible() {
 		a.hideWindow()
+		return
+	}
+	// 点击菜单栏图标会先触发 OnBlur 收起面板，250ms 内忽略紧随其后的 OnClick 避免闪现重开
+	if time.Since(a.lastBlurHide) < 250*time.Millisecond {
 		return
 	}
 	a.ensureWindow()
