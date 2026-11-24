@@ -104,20 +104,23 @@
 | `FLYSHADOW_CORE_LIB` | 显式指定原生动态库路径（`.dylib` / `.dll`） |
 | `FLYSHADOW_GEOIP` | 显式指定 `Country-only-cn-private.mmdb` 路径 |
 | `FLYSHADOW_BAR_RUN_FILE` | 自定义运行态发现文件路径（默认 `~/.FlyShadow/flyshadow-bar.run.json`） |
+| `FLYSHADOW_UPDATE_URL` | 可选镜像/测试更新源目录（仍强制官方 Ed25519 公钥验签） |
 
-## CLI 使用说明
+## CLI 使用说明（`fsbar`）
 
-无参数运行 `flyshadow-bar` 将启动菜单栏 / 托盘 GUI（支持 `--hidden` 静默驻留托盘）。应用运行期间，可在终端直接调用以下子命令进行控制（均可附加 `--json` 输出结构化数据）：
+命令行工具名称为 **`fsbar`**（macOS 安装包内对应 `"/Applications/FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar"`，可软链至 `/usr/local/bin/fsbar` 或 `~/.local/bin/fsbar`；源码构建通过 `make build` 生成 `bin/fsbar`）。
+
+无参数运行 `fsbar` 将启动菜单栏 / 托盘 GUI（支持 `--hidden` 静默驻留托盘）。应用运行期间，可在终端直接调用以下子命令进行控制（均可附加 `--json` 输出结构化数据，运行 `fsbar help <子命令>` 或 `fsbar <子命令> --help` 查看完整参数与示例）：
 
 | 子命令 | 别名 | 说明 |
 | --- | --- | --- |
 | `status` | - | 查看当前连接状态、节点、代理模式、端口、传输协议与实时速率 |
 | `ls` | `nodes` | 列出所有可用订阅节点、收藏状态、QUIC/UDP 标签与延迟 |
 | `node <query>` | `use <query>` | 按节点 ID、精确名称或关键词热切换当前节点 |
-| `mode <mode>` | - | 切换代理模式，支持 `rule`（规则）、`global`（全局）、`direct`（直连） |
-| `udp <on\|off\|toggle>` | - | 开启、关闭或切换 UDP 加速（QUIC）并热重连 |
-| `native-udp <on\|off\|toggle>` | - | 开启、关闭或切换原生 UDP 转发并热重连 |
-| `sysproxy <on\|off\|toggle>` | - | 开启、关闭或切换操作系统代理 |
+| `mode [mode]` | - | 查询或切换代理模式，支持 `rule`（规则）、`global`（全局）、`direct`（直连） |
+| `udp [on\|off\|toggle]` | - | 开启、关闭或切换 UDP 加速（QUIC）并热重连 |
+| `native-udp [on\|off\|toggle]` | - | 开启、关闭或切换原生 UDP 转发并热重连 |
+| `sysproxy [on\|off\|toggle]` | - | 开启、关闭或切换操作系统代理 |
 | `ping` | - | 触发全量节点并发延迟测速并按延迟排序输出 |
 | `reload` | - | 重新加载 `config.json` 与域名分流规则并刷新引擎状态 |
 | `rules` | `rule ls` | 列出所有自定义分流规则（ID、状态、匹配类型、规则值、动作、标签） |
@@ -125,43 +128,49 @@
 | `rule toggle <id>` | - | 启用或禁用指定自定义规则并热生效 |
 | `rule rm <id>` | `rule del` | 删除指定自定义规则并热生效 |
 | `conns` | `connections` | 查看底层核心库当前的实时活跃连接列表 |
-| `version` | - | 输出客户端版本号、提交哈希与构建时间 |
+| `version` | `-v` / `--version` | 输出客户端版本号、提交哈希与构建时间 |
 | `update` | - | 检查 GitHub Releases 最新版本（`--download` 自动下载安装包） |
+| `help [cmd]` | `-h` / `--help` | 查看完整帮助或单个子命令的详尽参数说明 |
 
 ### 常用示例
 
 ```bash
+# 查看总览帮助或单个子命令详尽说明
+fsbar --help
+fsbar help rule
+fsbar mode --help
+
 # 查看运行状态与全部节点
-flyshadow-bar status
-flyshadow-bar ls
+fsbar status
+fsbar ls
 
 # 按关键词或节点 ID 热切换节点
-flyshadow-bar use 香港
-flyshadow-bar node 12
+fsbar use 香港
+fsbar node 12
 
 # 切换代理模式与 UDP / 系统代理开关
-flyshadow-bar mode rule
-flyshadow-bar udp on
-flyshadow-bar native-udp toggle
-flyshadow-bar sysproxy on
+fsbar mode rule
+fsbar udp on
+fsbar native-udp toggle
+fsbar sysproxy on
 
 # 全量测速与热重载配置
-flyshadow-bar ping
-flyshadow-bar reload
+fsbar ping
+fsbar reload
 
 # 自定义规则快捷管理（立即热生效，不中断隧道）
-flyshadow-bar rules
-flyshadow-bar rule add openai.com --match suffix --action proxy --label ai
-flyshadow-bar rule add 192.168.0.0/16 --match cidr4 --action direct
-flyshadow-bar rule toggle 1
-flyshadow-bar rule rm 1
+fsbar rules
+fsbar rule add openai.com --match suffix --action proxy --label ai
+fsbar rule add 192.168.0.0/16 --match cidr4 --action direct
+fsbar rule toggle 1
+fsbar rule rm 1
 
 # 查看实时活跃连接
-flyshadow-bar conns
+fsbar conns
 
 # 查看版本与检查更新
-flyshadow-bar version
-flyshadow-bar update --download
+fsbar version
+fsbar update --download
 ```
 
 ## 本地开发与测试
@@ -172,7 +181,7 @@ flyshadow-bar update --download
 # 直接运行
 make run
 
-# 编译本机可执行文件到 bin/flyshadow-bar
+# 编译本机可执行文件到 bin/fsbar
 make build
 
 # 运行全量单元测试

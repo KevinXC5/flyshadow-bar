@@ -3,6 +3,13 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -62,10 +69,75 @@ type UpdateManager struct {
 }
 
 func newUpdateManager(restartFn func()) *UpdateManager {
+	if raw := strings.TrimSpace(os.Getenv("FLYSHADOW_UPDATE_URL")); raw != "" {
+		if src, err := newDirUpdateSource(raw, runtime.GOOS, runtime.GOARCH); err == nil {
+			mygo.Updater.SetSource(src)
+		}
+	}
 	return &UpdateManager{
 		restartFn:   restartFn,
 		idleTimeout: updateIdleTimeout,
 	}
+}
+
+// dirUpdateSource 支持通过环境变量 FLYSHADOW_UPDATE_URL 指定自建镜像或本地回环测试更新源。
+// 所有下载文件仍强制由编译进应用的 Ed25519 公钥验证签名，无法绕过签名校验。
+type dirUpdateSource struct {
+	baseURL string
+	target  string
+	client  *http.Client
+}
+
+func newDirUpdateSource(rawURL, goos, goarch string) (*dirUpdateSource, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("无效的更新源地址: %q", rawURL)
+	}
+	host := u.Hostname()
+	isLoopback := strings.EqualFold(host, "localhost")
+	if !isLoopback {
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			isLoopback = true
+		}
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback) {
+		return nil, fmt.Errorf("更新源仅允许 https 或本机回环 http: %q", rawURL)
+	}
+	return &dirUpdateSource{
+		baseURL: strings.TrimRight(u.String(), "/"),
+		target:  goos + "-" + goarch,
+		client:  &http.Client{Timeout: 5 * time.Minute},
+	}, nil
+}
+
+func (s *dirUpdateSource) Manifest(ctx context.Context, _ bool) (io.ReadCloser, error) {
+	return s.Open(ctx, s.baseURL+"/update-"+s.target+".json")
+}
+
+func (s *dirUpdateSource) Open(ctx context.Context, rawURL string) (io.ReadCloser, error) {
+	targetURL := rawURL
+	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
+		// 将清单中的文件名映射到当前镜像/本地测试源目录，保留 Ed25519 签名校验。
+		if idx := strings.LastIndex(u.Path, "/"); idx >= 0 && idx+1 < len(u.Path) {
+			targetURL = s.baseURL + "/" + u.Path[idx+1:]
+		} else {
+			targetURL = s.baseURL + "/" + strings.TrimLeft(u.Path, "/")
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "fsbar-updater")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("GET %s: %s", targetURL, resp.Status)
+	}
+	return resp.Body, nil
 }
 
 func (u *UpdateManager) version() string {

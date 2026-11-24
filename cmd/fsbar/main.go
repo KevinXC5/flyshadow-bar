@@ -50,13 +50,19 @@ func isGUILaunch(args []string) bool {
 }
 
 func runGUI(args []string) error {
-	fs := flag.NewFlagSet("flyshadow-bar", flag.ContinueOnError)
+	fs := flag.NewFlagSet("fsbar", flag.ContinueOnError)
+	fs.Usage = func() {
+		printHelp(os.Stderr)
+	}
 	cfgPath := fs.String("config", "", "指定 FlyShadow config.json 路径")
 	libPath := fs.String("core-lib", "", "指定 FlyShadow 核心动态库路径")
 	hidden := fs.Bool("hidden", false, "启动后隐藏主窗口，仅驻留托盘")
 	noConnect := fs.Bool("no-connect", false, "启动后不自动连接隧道")
 	noAutoSys := fs.Bool("no-auto-sysproxy", false, "禁用启动连接后自动开启系统代理")
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
 		return err
 	}
 

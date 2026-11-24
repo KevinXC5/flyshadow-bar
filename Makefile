@@ -1,4 +1,4 @@
-APP_NAME := flyshadow-bar
+APP_NAME := fsbar
 GITHUB_REPO := KevinXC5/flyshadow-bar
 VERSION_PKG := github.com/KevinXC5/flyshadow-bar/internal/version
 
@@ -19,10 +19,10 @@ DIST_DIR := dist
 
 build:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 go build -ldflags "$(BASE_LDFLAGS)" -o $(BIN_DIR)/$(APP_NAME) ./cmd/flyshadow-bar
+	CGO_ENABLED=0 go build -ldflags "$(BASE_LDFLAGS)" -o $(BIN_DIR)/$(APP_NAME) ./cmd/fsbar
 
 run:
-	CGO_ENABLED=0 go run -ldflags "$(BASE_LDFLAGS)" ./cmd/flyshadow-bar
+	CGO_ENABLED=0 go run -ldflags "$(BASE_LDFLAGS)" ./cmd/fsbar
 
 test:
 	CGO_ENABLED=0 go test -v ./...

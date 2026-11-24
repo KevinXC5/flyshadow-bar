@@ -3,6 +3,9 @@ package ui
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -106,5 +109,42 @@ func TestUpdateManagerDisabledAndCancel(t *testing.T) {
 	mgr.idleTimeout = 40 * time.Millisecond
 	if _, err := mgr.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "超时") {
 		t.Fatalf("空闲超时应返回超时提示, got=%v", err)
+	}
+}
+
+func TestDirUpdateSource(t *testing.T) {
+	if _, err := newDirUpdateSource("http://example.com/updates", "darwin", "arm64"); err == nil {
+		t.Fatalf("非本机回环的明文 http 源应被拒绝")
+	}
+
+	var gotPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.Path)
+		_, _ = w.Write([]byte("ok:" + r.URL.Path))
+	}))
+	defer srv.Close()
+
+	src, err := newDirUpdateSource(srv.URL, "darwin", "arm64")
+	if err != nil {
+		t.Fatalf("newDirUpdateSource 失败: %v", err)
+	}
+	rc, err := src.Manifest(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Manifest 失败: %v", err)
+	}
+	b, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(b) != "ok:/update-darwin-arm64.json" {
+		t.Fatalf("Manifest 响应异常: %q", string(b))
+	}
+
+	rc2, err := src.Open(context.Background(), "https://github.com/KevinXC5/flyshadow-bar/releases/download/v0.2.1/flyshadow-bar-0.2.0-to-0.2.1-darwin-arm64.delta")
+	if err != nil {
+		t.Fatalf("Open 失败: %v", err)
+	}
+	b2, _ := io.ReadAll(rc2)
+	rc2.Close()
+	if string(b2) != "ok:/flyshadow-bar-0.2.0-to-0.2.1-darwin-arm64.delta" {
+		t.Fatalf("Open 文件名映射异常: %q", string(b2))
 	}
 }

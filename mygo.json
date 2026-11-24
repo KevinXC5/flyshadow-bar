@@ -3,7 +3,7 @@
   "slug": "flyshadow-bar",
   "identifier": "com.kevinxc.flyshadow-bar",
   "version": "0.1.0-dev",
-  "main": "./cmd/flyshadow-bar",
+  "main": "./cmd/fsbar",
   "out": "dist",
   "macos": {
     "minimumSystemVersion": "13.0",

@@ -21,7 +21,7 @@
 - **全程零 CGO（`CGO_ENABLED=0`）**：所有构建、测试与交叉编译必须保持 `CGO_ENABLED=0`，不得引入 C 源码、CGO 依赖或需要 C 编译器的库；确保可跨架构构建 `darwin/arm64`、`darwin/amd64` 与 `windows/amd64`。
 - **纯 Go 原生 GPU UI 与 MyGo 打包**：桌面端基于 `github.com/egoist/mygo`（macOS Metal / Windows Direct3D 11）与原生系统托盘实现，严禁引入 Electron、WebView、Node.js 或网页前端构建链。MyGo CLI 由 `go.mod` 的 `tool` 指令固定，通过 `go tool mygo` 调用，打包与增量更新元数据配置在 `mygo.json`。正式版本号由发版流程从 Git 标签注入 `mygo.json`，仓库内 `mygo.json` 的 `version` 仅用于本地开发构建。
 - **切勿覆盖 `mygo.App.Version()`**：`mygo build` 通过 `-ldflags` 注入当前版本号供 `mygo.Updater` 匹配增量补丁；启动时仅在 `mygo.App.Version()` 为空或 `"0.0.0"` 时才回退调用 `mygo.App.SetVersion`。
-- **单二进制双形态**：入口位于 `cmd/flyshadow-bar/`，无参数或仅带 GUI 标志（`--gui`/`--hidden`/`--config`/`--core-lib`/`--no-connect`/`--no-auto-sysproxy`/`-psn_*`）时启动常驻 GUI；携带子命令时通过本地回环 Bearer Token 控制接口（`~/.FlyShadow/flyshadow-bar.run.json`，权限 `0600`）与运行中实例通信。
+- **单二进制双形态（CLI 名称 `fsbar`）**：入口位于 `cmd/fsbar/`，无参数或仅带 GUI 标志（`--gui`/`--hidden`/`--config`/`--core-lib`/`--no-connect`/`--no-auto-sysproxy`/`-psn_*`）时启动常驻 GUI；携带子命令时通过本地回环 Bearer Token 控制接口（`~/.FlyShadow/flyshadow-bar.run.json`，权限 `0600`）与运行中实例通信，且所有子命令均支持 `fsbar help <子命令>` 与 `--help`。
 - **包职责划分**：
   - `internal/config`：无损配置加载/保存、节点匹配、13 种官方分流规则与自定义规则 CRUD、客户端独立偏好 `flyshadow-bar.prefs.json`。
   - `internal/core`：零 CGO FFI 绑定（macOS `purego`、Windows `golang.org/x/sys/windows`）、核心动态库与 GeoIP 自动定位及 JAR 解压缓存。

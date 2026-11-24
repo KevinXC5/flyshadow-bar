@@ -1,6 +1,6 @@
 ## 下载与安装
 
-- **macOS（Apple Silicon / M 系列）**：下载 `flyshadow-bar-*-arm64.dmg`，打开后将 `FlyShadow Bar.app` 拖入「应用程序」文件夹即可运行（命令行 CLI 可直接使用应用内的 `FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar`）。
+- **macOS（Apple Silicon / M 系列）**：下载 `flyshadow-bar-*-arm64.dmg`，打开后将 `FlyShadow Bar.app` 拖入「应用程序」文件夹即可运行（命令行工具 `fsbar` 可软链至应用内的 `FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar`，例如 `ln -sf "/Applications/FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar" /usr/local/bin/fsbar`）。
 - **macOS（Intel / x64）**：下载 `flyshadow-bar-*-amd64.dmg`，打开后拖入「应用程序」文件夹运行。
 - **Windows（x64）**：下载 `flyshadow-bar-setup-*-amd64.exe` 安装运行。
 - **应用内增量更新**：从正式安装包运行后，在「设置 → 订阅、环境与更新」中支持 **Ed25519 签名验证与二进制增量更新（Delta Update）**，仅下载版本间的差异补丁即可一键更新并重启，大幅节省流量。
