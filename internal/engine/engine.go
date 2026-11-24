@@ -1138,6 +1138,17 @@ func (e *Engine) SetRuleLabelActive(label string, active bool) error {
 	return nil
 }
 
+// ActiveRules 按需返回当前加载至核心库的全部生效规则（含来源与命中优先级顺序），不进入高频状态快照。
+func (e *Engine) ActiveRules() []config.ActiveRuleEntry {
+	e.mu.RLock()
+	cfg := e.cfg
+	e.mu.RUnlock()
+	if cfg == nil {
+		return nil
+	}
+	return cfg.ActiveRuleEntries()
+}
+
 // Connections 返回底层核心库当前活跃连接列表（按活跃时间降序）。
 func (e *Engine) Connections() ([]core.ConnectionInfo, error) {
 	list, err := e.core.TunnelConnections()

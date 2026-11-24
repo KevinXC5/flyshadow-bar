@@ -280,13 +280,13 @@ func (a *App) ensureWindow() {
 			a.refreshTrayMenu()
 		}
 	})
-	// 托盘弹窗体验：点击面板外部自动收起（在「连接」监控页、更新下载中或显式 --show 时保留不收起）
+	// 托盘弹窗体验：点击面板外部自动收起（更新下载中、配置弹窗打开或显式 --show 时保留不收起）
 	a.win.OnBlur(func() {
-		if a.quitting || a.pinWindow || a.win == nil || !a.win.IsVisible() {
+		if !shouldHideOnBlur(a.quitting, a.pinWindow, a.win != nil && a.win.IsVisible(), a.vm) {
 			return
 		}
-		if a.vm != nil && (a.vm.activeTab == 2 || a.vm.updateDownloading || a.vm.subModalOpen || a.vm.subSaving) {
-			return
+		if a.vm != nil {
+			a.vm.connSortMenuOpen = false
 		}
 		a.lastBlurHide = time.Now()
 		a.win.Hide()
@@ -379,8 +379,23 @@ func (a *App) hideWindow() {
 	if a.win == nil {
 		return
 	}
+	if a.vm != nil {
+		a.vm.connSortMenuOpen = false
+		a.vm.closeActiveRulesModal()
+	}
 	a.win.Hide()
 	a.refreshTrayMenu()
+}
+
+// shouldHideOnBlur 判断主窗口失焦时是否应自动收起（所有主标签页均一致自动收起，仅更新下载中、模态弹窗打开或 --show 钉住时保持可见）。
+func shouldHideOnBlur(quitting, pinWindow, visible bool, vm *viewModel) bool {
+	if quitting || pinWindow || !visible {
+		return false
+	}
+	if vm != nil && (vm.updateDownloading || vm.subModalOpen || vm.subSaving || vm.activeRulesModal.open) {
+		return false
+	}
+	return true
 }
 
 func (a *App) toggleWindow() {

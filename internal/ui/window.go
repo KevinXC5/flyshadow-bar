@@ -46,9 +46,12 @@ type viewModel struct {
 	ruleFilterAction int // -1=全部, 0=直连, 1=拒绝, 2=代理
 
 	// 实时连接页状态
-	connections     []core.ConnectionInfo
-	connSearchQuery string
-	connsPaused     bool
+	connections      []core.ConnectionInfo
+	connSearchQuery  string
+	connsPaused      bool
+	connSortField    connSortField
+	connSortAsc      bool
+	connSortMenuOpen bool
 
 	// 订阅密码配置弹窗状态
 	subModalOpen     bool
@@ -56,6 +59,9 @@ type viewModel struct {
 	subPasswordShow  bool
 	subSaving        bool
 	subModalErr      string
+
+	// 生效分流规则查看弹窗状态
+	activeRulesModal activeRulesModalState
 
 	checkingUpdate      bool
 	updateNativeEnabled bool
@@ -179,6 +185,10 @@ func (vm *viewModel) render(c *ui.Context) {
 				if !vm.subSaving {
 					vm.closeSubscribeModal()
 				}
+			} else if vm.activeRulesModal.open {
+				vm.closeActiveRulesModal()
+			} else if vm.connSortMenuOpen {
+				vm.connSortMenuOpen = false
 			} else {
 				vm.app.hideWindow()
 			}
@@ -233,6 +243,7 @@ func (vm *viewModel) render(c *ui.Context) {
 	})
 
 	vm.renderSubscribeModal(c, p)
+	vm.renderActiveRulesModal(c, p)
 }
 
 func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
@@ -253,6 +264,9 @@ func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 		ui.Spacer(c)
 		prevTab := vm.activeTab
 		if ui.Segmented(c.Key("nav-tabs"), &vm.activeTab, "节点", "规则", "连接", "设置").Changed() {
+			if vm.activeTab != 2 {
+				vm.connSortMenuOpen = false
+			}
 			if vm.activeTab == 2 && prevTab != 2 && vm.app != nil {
 				go vm.app.refreshConnections()
 			}
@@ -1024,13 +1038,17 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				})
 
 				ui.Divider(c)
-				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+				ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
 					geoState := "未加载 GeoIP"
 					if snap.GeoIPLoaded {
 						geoState = "已加载 GeoIP"
 					}
 					ui.Text(c, fmt.Sprintf("%d 条生效规则 · %s", snap.RuleCount, geoState)).
-						Grow(1).FontSize(11.5).TextColor(p.textMuted)
+						Grow(1).FontSize(11.5).TextColor(p.textMuted).Ellipsis("…")
+					if ui.Button(c.Key("btn-view-active-rules"), "查看规则").Padding(5, 10).Radius(7).
+						Tooltip("查看全部生效分流规则").Clicked() {
+						vm.openActiveRulesModal()
+					}
 					if renderToolbarIconBtn(c, p, "btn-reload-cfg", "重载配置", "重载配置", svgRefresh, false, p.accent, p.accentSoft, p.borderStrong, false) {
 						vm.runAsync(func() error { return vm.app.eng.Reload() }, "配置已重载")
 					}
@@ -1053,7 +1071,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				if runtime.GOOS == "darwin" {
 					ui.Divider(c)
 					showSpeed := vm.currentPrefs().ShowTraySpeed
-					renderSettingSwitch(c, p, "sw-tray-speed", "菜单栏显示网速", "实时显示上下行速率", &showSpeed, func(v bool) {
+					renderSettingSwitch(c, p, "sw-tray-speed", "菜单栏显示网速", "每 3 秒更新上下行速率", &showSpeed, func(v bool) {
 						if vm.app != nil {
 							vm.app.setShowTraySpeed(v)
 						}

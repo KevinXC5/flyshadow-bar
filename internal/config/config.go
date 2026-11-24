@@ -942,7 +942,23 @@ func (c *Config) ToggleStar(nodeID int) bool {
 
 // ActiveRules 按官方 FlyShadow 客户端逻辑生成需加载到核心的域名规则列表：
 // 先加载已启用的用户自定义规则（customRuleList），再加载订阅下发规则（subscribeInfo.customRule）。
-func (c *Config) ActiveRules() []DomainRule {
+// ActiveRuleSource 标识一条生效规则的来源。
+type ActiveRuleSource string
+
+const (
+	RuleSourceCustom    ActiveRuleSource = "custom"    // 用户自定义规则（优先级高于订阅内置规则）
+	RuleSourceSubscribe ActiveRuleSource = "subscribe" // 订阅下发内置规则
+)
+
+// ActiveRuleEntry 表示按核心库加载顺序生效的单条分流规则及其来源。
+type ActiveRuleEntry struct {
+	Order  int              `json:"order"`
+	Source ActiveRuleSource `json:"source"`
+	Rule   DomainRule       `json:"rule"`
+}
+
+// ActiveRuleEntries 返回按核心库加载顺序排列的全部生效规则（含自定义与订阅内置来源标识）。
+func (c *Config) ActiveRuleEntries() []ActiveRuleEntry {
 	if c == nil {
 		return nil
 	}
@@ -953,7 +969,7 @@ func (c *Config) ActiveRules() []DomainRule {
 	hasLabelFilter := len(activeLabels) > 0
 	_, defaultActive := activeLabels[DefaultRuleActiveSentinel]
 
-	out := make([]DomainRule, 0, len(c.CustomRuleList)+len(c.SubscribeInfo.CustomRules))
+	out := make([]ActiveRuleEntry, 0, len(c.CustomRuleList)+len(c.SubscribeInfo.CustomRules))
 	for _, r := range c.CustomRuleList {
 		if strings.TrimSpace(r.Domain) == "" {
 			continue
@@ -971,13 +987,33 @@ func (c *Config) ActiveRules() []DomainRule {
 				continue
 			}
 		}
-		out = append(out, r)
+		out = append(out, ActiveRuleEntry{
+			Order:  len(out) + 1,
+			Source: RuleSourceCustom,
+			Rule:   r,
+		})
 	}
 	for _, r := range c.SubscribeInfo.CustomRules {
 		if strings.TrimSpace(r.Domain) == "" {
 			continue
 		}
-		out = append(out, r)
+		out = append(out, ActiveRuleEntry{
+			Order:  len(out) + 1,
+			Source: RuleSourceSubscribe,
+			Rule:   r,
+		})
+	}
+	return out
+}
+
+func (c *Config) ActiveRules() []DomainRule {
+	entries := c.ActiveRuleEntries()
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]DomainRule, len(entries))
+	for i, e := range entries {
+		out[i] = e.Rule
 	}
 	return out
 }

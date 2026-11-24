@@ -6,11 +6,19 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo"
 
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
 	"github.com/KevinXC5/flyshadow-bar/internal/engine"
+)
+
+const (
+	// traySpeedRefreshInterval 控制菜单栏上下行速率的刷新节奏（每 3 秒更新一次，避免每秒跳动干扰视线）。
+	traySpeedRefreshInterval = 3 * time.Second
+	// traySpeedRefreshTolerance 为 1 秒定时器抖动留出 100ms 容差，确保第 3 秒采样稳定命中而非滑落到第 4 秒。
+	traySpeedRefreshTolerance = 100 * time.Millisecond
 )
 
 // trayController 负责菜单栏 / 系统托盘的构建、状态刷新与快捷控制。
@@ -21,6 +29,8 @@ type trayController struct {
 	lastNodeSig    string
 	lastConnected  bool
 	lastSpeedKey   string
+	lastSpeedDraw  time.Time
+	nowFn          func() time.Time
 	hasInitialized bool
 	iconConnected  []byte
 	iconIdle       []byte
@@ -135,7 +145,7 @@ func (tc *trayController) Update(snap engine.Snapshot) {
 
 // syncDarwinVisual 统一管理 macOS 菜单栏的纯黑模板图标与双行紧凑网速渲染：
 // 开启「菜单栏显示网速」且已连接时，将飞标与上下两行速率合成为一张窄幅纯黑模板图，
-// 避免单行标题占用过多菜单栏空间；关闭或断开时恢复标准单图标。
+// 避免单行标题占用过多菜单栏空间，并按 3 秒周期节流更新；关闭或断开时立即恢复标准单图标。
 func (tc *trayController) syncDarwinVisual(snap engine.Snapshot) {
 	if runtime.GOOS != "darwin" || tc.tray == nil {
 		return
@@ -143,8 +153,9 @@ func (tc *trayController) syncDarwinVisual(snap engine.Snapshot) {
 	connected := snap.State == engine.StateConnected
 	showSpeed := tc.app.prefs.ShowTraySpeed && connected
 	if !showSpeed {
-		if tc.lastSpeedKey != "" || !tc.hasInitialized || connected != tc.lastConnected {
+		if tc.lastSpeedKey != "" || !tc.lastSpeedDraw.IsZero() || !tc.hasInitialized || connected != tc.lastConnected {
 			tc.lastSpeedKey = ""
+			tc.lastSpeedDraw = time.Time{}
 			tc.lastConnected = connected
 			tc.tray.SetTitle("")
 			if connected {
@@ -157,13 +168,34 @@ func (tc *trayController) syncDarwinVisual(snap engine.Snapshot) {
 	}
 
 	speedKey := FormatTraySpeed(snap.UploadSpeedBps) + "|" + FormatTraySpeed(snap.DownloadSpeedBps)
-	if speedKey == tc.lastSpeedKey && connected == tc.lastConnected {
+	now := tc.now()
+	if !tc.shouldRedrawTraySpeed(connected, speedKey, now) {
 		return
 	}
 	tc.lastSpeedKey = speedKey
+	tc.lastSpeedDraw = now
 	tc.lastConnected = connected
 	tc.tray.SetTitle("")
 	_ = tc.tray.SetIcon(makeDarwinTraySpeedIconPNG(connected, snap.UploadSpeedBps, snap.DownloadSpeedBps), true)
+}
+
+func (tc *trayController) now() time.Time {
+	if tc != nil && tc.nowFn != nil {
+		return tc.nowFn()
+	}
+	return time.Now()
+}
+
+// shouldRedrawTraySpeed 判断当前是否应刷新菜单栏网速模板图：
+// 首次展示或连接状态刚切换时立即绘制，稳态下至少间隔 3 秒（含 100ms 定时抖动容差）且数值变化才重绘。
+func (tc *trayController) shouldRedrawTraySpeed(connected bool, speedKey string, now time.Time) bool {
+	if tc.lastSpeedKey == "" || tc.lastSpeedDraw.IsZero() || connected != tc.lastConnected {
+		return true
+	}
+	if now.Sub(tc.lastSpeedDraw) < traySpeedRefreshInterval-traySpeedRefreshTolerance {
+		return false
+	}
+	return speedKey != tc.lastSpeedKey
 }
 
 func (tc *trayController) patchMenuInPlace(snap engine.Snapshot) {

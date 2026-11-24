@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image/png"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -292,5 +293,201 @@ func TestCalcTrayPopoverPos(t *testing.T) {
 	x, y, ok = calcTrayPopoverPos(mygo.Rectangle{}, winWork, 500, 780, "windows")
 	if !ok || x != 1920-500-8 || y != 1032-780-8 {
 		t.Fatalf("windows fallback pos = (%d,%d,ok=%v)", x, y, ok)
+	}
+}
+
+func TestConnectionSortingAndPopover(t *testing.T) {
+	vm := newViewModel(nil, engine.Snapshot{
+		State:     engine.StateConnected,
+		ModeCode:  core.ProxyModeRule,
+		ProxyPort: 7890,
+	})
+	vm.activeTab = 2
+	vm.connections = []core.ConnectionInfo{
+		{Protocol: "TCP", SourceAddr: "127.0.0.1", SourcePort: 50001, TargetAddr: "slow-old.example", TargetPort: 443, ProxyType: "Proxy", ActiveTime: 1000, DownloadTraffic: 50 * 1024, DownloadTrafficTotal: 900 * 1024},
+		{Protocol: "TCP", SourceAddr: "127.0.0.1", SourcePort: 50002, TargetAddr: "fast-mid.example", TargetPort: 443, ProxyType: "Proxy", ActiveTime: 2000, DownloadTraffic: 5 * 1024 * 1024, DownloadTrafficTotal: 300 * 1024},
+		{Protocol: "TCP", SourceAddr: "127.0.0.1", SourcePort: 50003, TargetAddr: "idle-new.example", TargetPort: 443, ProxyType: "Direct", ActiveTime: 3000, DownloadTraffic: 0, DownloadTrafficTotal: 100 * 1024},
+	}
+
+	// 默认：创建时间降序（新 -> 旧）
+	got := vm.filteredConnections()
+	if got[0].TargetAddr != "idle-new.example" || got[1].TargetAddr != "fast-mid.example" || got[2].TargetAddr != "slow-old.example" {
+		t.Fatalf("default created-at desc order mismatch: %+v", got)
+	}
+
+	// 点击工具栏排序按钮打开弹窗，选择「下载速度降序」
+	tt := ui.NewTester(vm.render, 500, 780)
+	if err := tt.Click("排序"); err != nil {
+		t.Fatalf("click 排序: %v", err)
+	}
+	if !vm.connSortMenuOpen || !tt.HasText("排序方式") || !tt.HasText("下载速度") || !tt.HasText("下载总量") || !tt.HasText("创建时间") {
+		t.Fatalf("sort popover did not open with expected options: open=%v texts=%v", vm.connSortMenuOpen, tt.Texts())
+	}
+	if err := tt.Click("下载速度降序"); err != nil {
+		t.Fatalf("click 下载速度降序: %v", err)
+	}
+	if vm.connSortMenuOpen || vm.connSortField != connSortByDownSpeed || vm.connSortAsc {
+		t.Fatalf("expected down speed desc & menu closed, got field=%v asc=%v open=%v", vm.connSortField, vm.connSortAsc, vm.connSortMenuOpen)
+	}
+	got = vm.filteredConnections()
+	if got[0].TargetAddr != "fast-mid.example" || got[1].TargetAddr != "slow-old.example" || got[2].TargetAddr != "idle-new.example" {
+		t.Fatalf("download speed desc order mismatch: %+v", got)
+	}
+	// 按下载速度排序时页面应展示实时下载速率
+	if !tt.HasText("↓5.00 MB/s") {
+		t.Fatalf("expected live download speed label in connection row, texts=%v", tt.Texts())
+	}
+
+	// 再次打开弹窗选择「下载总量升序」
+	if err := tt.Click("排序"); err != nil {
+		t.Fatalf("reopen 排序: %v", err)
+	}
+	if err := tt.Click("下载总量升序"); err != nil {
+		t.Fatalf("click 下载总量升序: %v", err)
+	}
+	got = vm.filteredConnections()
+	if got[0].TargetAddr != "idle-new.example" || got[1].TargetAddr != "fast-mid.example" || got[2].TargetAddr != "slow-old.example" {
+		t.Fatalf("download total asc order mismatch: %+v", got)
+	}
+
+	// 再次打开弹窗选择「创建时间升序」
+	if err := tt.Click("排序"); err != nil {
+		t.Fatalf("reopen 排序 2: %v", err)
+	}
+	if err := tt.Click("创建时间升序"); err != nil {
+		t.Fatalf("click 创建时间升序: %v", err)
+	}
+	got = vm.filteredConnections()
+	if got[0].TargetAddr != "slow-old.example" || got[1].TargetAddr != "fast-mid.example" || got[2].TargetAddr != "idle-new.example" {
+		t.Fatalf("created-at asc order mismatch: %+v", got)
+	}
+}
+
+func TestTraySpeedRefreshThrottledTo3Seconds(t *testing.T) {
+	base := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+	tc := &trayController{lastConnected: true}
+
+	// 首次展示必须立即绘制
+	if !tc.shouldRedrawTraySpeed(true, "10K|20K", base) {
+		t.Fatalf("first tray speed draw must happen immediately")
+	}
+	tc.lastSpeedKey = "10K|20K"
+	tc.lastSpeedDraw = base
+
+	// 1 秒与 2 秒后即使速度变化也应跳过重绘
+	if tc.shouldRedrawTraySpeed(true, "30K|80K", base.Add(1*time.Second)) {
+		t.Fatalf("1s update should be throttled")
+	}
+	if tc.shouldRedrawTraySpeed(true, "50K|120K", base.Add(2*time.Second)) {
+		t.Fatalf("2s update should be throttled")
+	}
+
+	// 第 3 秒（包含少量定时器提前抖动，例如 2950ms）应触发重绘
+	if !tc.shouldRedrawTraySpeed(true, "50K|120K", base.Add(2950*time.Millisecond)) {
+		t.Fatalf("3s update (within jitter tolerance) should redraw")
+	}
+
+	// 超过 3 秒但数值完全没变时不重复渲染
+	if tc.shouldRedrawTraySpeed(true, "10K|20K", base.Add(4*time.Second)) {
+		t.Fatalf("unchanged speed key should skip redraw")
+	}
+
+	// 连接状态刚变化时立即响应，不受 3 秒节流限制
+	tc.lastConnected = false
+	if !tc.shouldRedrawTraySpeed(true, "10K|20K", base.Add(500*time.Millisecond)) {
+		t.Fatalf("connection state transition should redraw immediately")
+	}
+}
+
+func TestShouldHideOnBlurAcrossAllTabs(t *testing.T) {
+	vm := newViewModel(nil, engine.Snapshot{})
+
+	// 四个主标签页（含连接页 activeTab==2）点击窗口外部都应自动收起
+	for tab := 0; tab <= 3; tab++ {
+		vm.activeTab = tab
+		if !shouldHideOnBlur(false, false, true, vm) {
+			t.Fatalf("tab %d should hide on blur", tab)
+		}
+	}
+
+	// 仅在更新下载中、模态弹窗打开或 --show 钉住时保持不收起
+	vm.activeTab = 2
+	vm.activeRulesModal.open = true
+	if shouldHideOnBlur(false, false, true, vm) {
+		t.Fatalf("active rules modal open should prevent hide on blur")
+	}
+	vm.activeRulesModal.open = false
+	vm.subModalOpen = true
+	if shouldHideOnBlur(false, false, true, vm) {
+		t.Fatalf("subscribe modal open should prevent hide on blur")
+	}
+	vm.subModalOpen = false
+	vm.updateDownloading = true
+	if shouldHideOnBlur(false, false, true, vm) {
+		t.Fatalf("update downloading should prevent hide on blur")
+	}
+	vm.updateDownloading = false
+	if shouldHideOnBlur(false, true, true, vm) {
+		t.Fatalf("pinWindow (--show) should prevent hide on blur")
+	}
+}
+
+func TestActiveRulesModalBrowseAndFilter(t *testing.T) {
+	vm := newViewModel(nil, engine.Snapshot{
+		State:       engine.StateConnected,
+		ModeCode:    core.ProxyModeRule,
+		ProxyPort:   7890,
+		GeoIPLoaded: true,
+		RuleCount:   4,
+	})
+	vm.activeTab = 3
+	vm.activeRulesModal.entries = []config.ActiveRuleEntry{
+		{Order: 1, Source: config.RuleSourceCustom, Rule: config.DomainRule{Domain: "openai.com", Matching: config.MatchDomainSuffix, ProxyType: 2, Label: "ai"}},
+		{Order: 2, Source: config.RuleSourceCustom, Rule: config.DomainRule{Domain: "192.168.0.0/16", Matching: config.MatchCIDR4, ProxyType: 0, DirectConnPriority: 1}},
+		{Order: 3, Source: config.RuleSourceSubscribe, Rule: config.DomainRule{Domain: "CN", Matching: config.MatchGeoIP, ProxyType: 0}},
+		{Order: 4, Source: config.RuleSourceSubscribe, Rule: config.DomainRule{Domain: "ads.tracker.test", Matching: config.MatchDomainKeyword, ProxyType: 1}},
+	}
+
+	tt := ui.NewTester(vm.render, 500, 820)
+	if !tt.HasText("查看规则") {
+		t.Fatalf("settings tab missing 查看规则 button, texts=%v", tt.Texts())
+	}
+	if err := tt.Click("查看规则"); err != nil {
+		t.Fatalf("click 查看规则: %v", err)
+	}
+	if !vm.activeRulesModal.open || !tt.HasText("生效分流规则") || !tt.HasText("openai.com") || !tt.HasText("ads.tracker.test") {
+		t.Fatalf("active rules modal did not render expected rules: open=%v texts=%v", vm.activeRulesModal.open, tt.Texts())
+	}
+
+	// 点击统计卡「拒绝」应只显示拒绝规则
+	if err := tt.Click("拒绝"); err != nil {
+		t.Fatalf("click 拒绝 stat card: %v", err)
+	}
+	if !tt.HasText("ads.tracker.test") || tt.HasText("openai.com") {
+		t.Fatalf("reject action filter did not take effect, texts=%v", tt.Texts())
+	}
+
+	// 点击重置筛选恢复全部规则
+	if err := tt.Click("重置筛选"); err != nil {
+		t.Fatalf("click 重置筛选: %v", err)
+	}
+	if !tt.HasText("openai.com") || !tt.HasText("CN") {
+		t.Fatalf("reset filter did not restore all rules, texts=%v", tt.Texts())
+	}
+
+	// 点击来源「自定义 (2)」应只显示自定义规则
+	if err := tt.Click("自定义 (2)"); err != nil {
+		t.Fatalf("click 自定义 (2): %v", err)
+	}
+	if !tt.HasText("openai.com") || !tt.HasText("192.168.0.0/16") || tt.HasText("ads.tracker.test") {
+		t.Fatalf("custom source filter did not take effect, texts=%v", tt.Texts())
+	}
+
+	// 关闭弹窗
+	if err := tt.Click("关闭生效规则"); err != nil {
+		t.Fatalf("click 关闭生效规则: %v", err)
+	}
+	if vm.activeRulesModal.open {
+		t.Fatalf("active rules modal did not close")
 	}
 }
