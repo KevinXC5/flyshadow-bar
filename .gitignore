@@ -1,0 +1,30 @@
+# 编译产物
+/bin/
+/dist/
+/build/
+*.exe
+*.app/
+*.dmg
+*.zip
+/flyshadow-bar
+
+# 测试与覆盖率
+*.test
+*.out
+coverage.html
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 本地敏感配置与缓存（严禁提交）
+config.json
+*.run.json
+*.prefs.json
+*.dylib
+*.dll
+*.mmdb
