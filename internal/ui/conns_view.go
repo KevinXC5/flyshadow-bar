@@ -12,23 +12,21 @@ import (
 )
 
 func (vm *viewModel) renderConnectionsView(c *ui.Context, p palette) {
-	// 1. 工具栏：搜索、筛选、暂停/继续、手动刷新
+	// 1. 工具栏：搜索、暂停/继续、手动刷新
 	ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
-		ui.SearchField(c.Key("conn-search"), &vm.connSearchQuery).Grow(1).Placeholder("搜索域名、IP、进程或命中规则…")
+		ui.SearchField(c.Key("conn-search"), &vm.connSearchQuery).Grow(1).Placeholder("搜索连接…")
 
-		pauseLabel := "暂停"
+		pauseIcon := svgPause
+		pauseTip := "暂停刷新"
 		if vm.connsPaused {
-			pauseLabel = "继续"
+			pauseIcon = svgPlay
+			pauseTip = "继续刷新"
 		}
-		pauseBtn := ui.Button(c.Key("conn-pause"), pauseLabel).Padding(5, 9).Radius(7)
-		if vm.connsPaused {
-			pauseBtn.Background(p.warningSoft).Border(1, p.warning).TextColor(p.warning)
-		}
-		if pauseBtn.Clicked() {
+		if renderToolbarIconBtn(c, p, "conn-pause", pauseTip, pauseTip, pauseIcon, vm.connsPaused, p.warning, p.warningSoft, p.warning, false) {
 			vm.connsPaused = !vm.connsPaused
 		}
 
-		if ui.Button(c.Key("conn-refresh"), "刷新").Padding(5, 9).Radius(7).Clicked() {
+		if renderToolbarIconBtn(c, p, "conn-refresh", "刷新", "刷新", svgRefresh, false, p.accent, p.accentSoft, p.borderStrong, false) {
 			if vm.app != nil {
 				go vm.app.refreshConnections()
 			}
@@ -37,20 +35,25 @@ func (vm *viewModel) renderConnectionsView(c *ui.Context, p palette) {
 
 	filtered := vm.filteredConnections()
 
-	// 2. 状态摘要行
+	// 2. 状态摘要行（未筛选时只显示总数，避免重复）
 	ui.Row(c).AlignItems(ui.Center).Padding(0, 2).Children(func() {
-		ui.Text(c, fmt.Sprintf("活跃连接 %d 条（显示 %d 条）· 右侧可一键加规则并热生效",
-			len(vm.connections), len(filtered))).
-			FontSize(11).TextColor(p.textMuted)
+		summary := fmt.Sprintf("共 %d 条连接", len(vm.connections))
+		if len(filtered) != len(vm.connections) {
+			summary = fmt.Sprintf("显示 %d / %d 条连接", len(filtered), len(vm.connections))
+		}
+		ui.Text(c, summary).FontSize(11).TextColor(p.textMuted)
 	})
 
-	// 3. 连接列表
-	ui.Scroll(c.Key("conns-scroll")).Grow(1).Children(func() {
-		ui.Column(c).Gap(5).Padding(0, 2, 6, 0).Children(func() {
+	// 3. 连接列表（右侧独立细滚动条槽道）
+	ui.Scroll(c.Key("conns-scroll")).Grow(1).Margin(0, -10, 0, 0).Children(func() {
+		ui.Column(c).Gap(5).Padding(0, 10, 6, 0).Children(func() {
 			if len(filtered) == 0 {
-				ui.Column(c).Padding(28, 16).Center().Gap(6).Children(func() {
-					ui.Text(c, "当前没有活跃连接").FontSize(13).Bold().TextColor(p.textSecondary)
-					ui.Text(c, "当浏览器或终端通过本地代理访问网络时，会在此实时显示").FontSize(11.5).TextColor(p.textMuted)
+				emptyText := "无匹配连接"
+				if len(vm.connections) == 0 {
+					emptyText = "暂无活跃连接"
+				}
+				ui.Column(c).Padding(28, 16).Center().Children(func() {
+					ui.Text(c, emptyText).FontSize(12.5).TextColor(p.textMuted)
 				})
 				return
 			}
@@ -68,7 +71,7 @@ func (vm *viewModel) renderConnectionRow(c *ui.Context, p palette, idx int, conn
 		AlignItems(ui.Center).Gap(8).Children(func() {
 
 		// 左侧目标信息与元标签
-		ui.Column(c).Grow(1).Gap(2.5).Children(func() {
+		ui.Column(c).Grow(1).MinWidth(0).Gap(2.5).Children(func() {
 			target := conn.TargetAddr
 			if conn.TargetPort > 0 {
 				target = fmt.Sprintf("%s:%d", conn.TargetAddr, conn.TargetPort)
@@ -82,26 +85,39 @@ func (vm *viewModel) renderConnectionRow(c *ui.Context, p palette, idx int, conn
 				routeFg, routeBg, routeLabel := connRouteStyle(conn.ProxyType, p)
 				renderMiniTag(c, routeLabel, routeFg, routeBg)
 				if conn.ProcessName != "" {
-					renderMiniTag(c, conn.ProcessName, p.textSecondary, p.pillBg)
+					procLabel := compactProcessLabel(conn.ProcessName, 16)
+					ui.Row(c).Padding(1, 5).Radius(4.5).Background(p.pillBg).
+						AlignItems(ui.Center).Tooltip(conn.ProcessName).Children(func() {
+						ui.Text(c, procLabel).FontSize(9.5).Bold().TextColor(p.textSecondary).NoWrap()
+					})
 				}
 				traffic := fmt.Sprintf("↑%s ↓%s", FormatBytes(conn.UploadTrafficTotal), FormatBytes(conn.DownloadTrafficTotal))
 				ui.Text(c, traffic).FontSize(10).TextColor(p.textMuted).NoWrap()
 			})
 		})
 
-		// 右侧快捷操作：一键加直连 / 一键加代理 / 断开连接
+		// 右侧快捷操作：加直连 / 加代理 / 断开
 		if conn.TargetAddr != "" {
 			if ui.Button(c.Key("add-direct"), "直连").Padding(3, 7).Radius(6).
-				TextColor(p.success).Tooltip("将该目标加入自定义直连规则并重连").Clicked() {
+				TextColor(p.success).Tooltip("加为直连规则").Clicked() {
 				vm.quickAddRuleFromConn(conn, 0)
 			}
 			if ui.Button(c.Key("add-proxy"), "代理").Padding(3, 7).Radius(6).
-				TextColor(p.accent).Tooltip("将该目标加入自定义代理规则并重连").Clicked() {
+				TextColor(p.accent).Tooltip("加为代理规则").Clicked() {
 				vm.quickAddRuleFromConn(conn, 2)
 			}
 		}
-		if ui.Button(c.Key("close"), "×").Padding(3, 7).Radius(6).
-			TextColor(p.danger).Tooltip("立即断开此连接").Clicked() {
+		closeBtn := ui.Box(c.Key("close")).Size(24, 24).Center().Radius(6).
+			Cursor(ui.CursorPointer).Label("断开连接").Tooltip("断开连接")
+		closeColor := p.textMuted
+		if closeBtn.Hovered() {
+			closeBtn.Background(p.dangerSoft)
+			closeColor = p.danger
+		}
+		closeBtn.Children(func() {
+			ui.Icon(c, svgClose).Size(13, 13).TextColor(closeColor)
+		})
+		if closeBtn.Clicked() {
 			closeKey := conn.CloseKey()
 			vm.runAsync(func() error {
 				vm.app.eng.CloseConnection(closeKey)
@@ -132,7 +148,7 @@ func (vm *viewModel) quickAddRuleFromConn(conn core.ConnectionInfo, action int) 
 		vm.app.eng.CloseConnection(closeKey)
 		vm.app.refreshConnections()
 		return nil
-	}, fmt.Sprintf("已添加 %s -> %s 并刷新连接", domain, config.RuleActionLabel(action)))
+	}, fmt.Sprintf("已设为%s：%s", config.RuleActionLabel(action), domain))
 }
 
 // suggestRuleFromTarget 根据连接目标自动推导合适的规则值与匹配类型（IP 用 /32 或 /128 CIDR，域名用后缀）。
@@ -176,4 +192,13 @@ func connRouteStyle(proxyType string, p palette) (ui.Color, ui.Color, string) {
 	default:
 		return p.accent, p.accentSoft, "代理"
 	}
+}
+
+// compactProcessLabel 将过长的进程名（如 "Chromium Helper (Network)"）截断为紧凑单行标签，完整名通过 Tooltip 查看。
+func compactProcessLabel(name string, maxRunes int) string {
+	r := []rune(strings.TrimSpace(name))
+	if len(r) <= maxRunes || maxRunes < 4 {
+		return string(r)
+	}
+	return strings.TrimSpace(string(r[:maxRunes-1])) + "…"
 }

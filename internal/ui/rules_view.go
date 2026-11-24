@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -29,20 +31,29 @@ func (vm *viewModel) renderRulesView(c *ui.Context, p palette) {
 		// 第一行：输入框 + 标签 + 提交/取消按钮
 		ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
 			inp := ui.TextInput(c.Key("rule-domain-input"), &vm.ruleDomainDraft).
-				Grow(1).Placeholder("输入域名 / 关键词 / IP CIDR / 进程名，回车即生效")
+				Grow(1).Placeholder("域名、IP/CIDR 或进程名")
 			ui.TextInput(c.Key("rule-label-input"), &vm.ruleLabelDraft).
-				Width(76).Placeholder("标签(可选)")
+				Width(76).Placeholder("分组")
 
-			btnText := "添加"
+			submitIcon := svgPlus
+			submitTip := "添加"
 			if vm.editingRuleID > 0 {
-				btnText = "保存"
+				submitIcon = svgCheck
+				submitTip = "保存"
 			}
-			submitBtn := ui.PrimaryButton(c.Key("rule-submit"), btnText).Padding(5, 12).Radius(7)
+			submitBtn := ui.Box(c.Key("rule-submit")).Size(30, 30).Radius(8).Center().
+				Background(p.accent).Cursor(ui.CursorPointer).Label(submitTip).Tooltip(submitTip)
+			if submitBtn.Hovered() {
+				submitBtn.Opacity(0.9)
+			}
+			submitBtn.Children(func() {
+				ui.Icon(c, submitIcon).Size(15, 15).TextColor(ui.Hex("#ffffff"))
+			})
 			if submitBtn.Clicked() || inp.Submitted() {
 				vm.submitRuleDraft()
 			}
 			if vm.editingRuleID > 0 {
-				if ui.Button(c.Key("rule-cancel-edit"), "取消").Padding(5, 8).Radius(7).Clicked() {
+				if renderToolbarIconBtn(c, p, "rule-cancel-edit", "取消", "取消编辑", svgClose, false, p.text, p.cardHover, p.border, false) {
 					vm.resetRuleDraft()
 				}
 			}
@@ -115,7 +126,7 @@ func (vm *viewModel) renderRulesView(c *ui.Context, p palette) {
 
 	// 2. 搜索与动作过滤栏
 	ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
-		ui.SearchField(c.Key("rule-search"), &vm.ruleSearchQuery).Grow(1).Placeholder("搜索自定义规则或标签…")
+		ui.SearchField(c.Key("rule-search"), &vm.ruleSearchQuery).Grow(1).Placeholder("搜索规则…")
 
 		filters := []struct {
 			code  int
@@ -136,6 +147,34 @@ func (vm *viewModel) renderRulesView(c *ui.Context, p palette) {
 				vm.ruleFilterAction = f.code
 			}
 		}
+
+		if snap.HasCloudAuth {
+			syncBtn := ui.Box(c.Key("rules-sync")).Size(30, 30).Radius(8).Center().
+				Background(p.card).Border(1, p.border).Label("同步云端规则").Tooltip("同步云端规则")
+			if snap.Syncing {
+				syncBtn.Background(p.accentSoft).Border(1, p.borderStrong)
+			} else {
+				syncBtn.Cursor(ui.CursorPointer)
+				if syncBtn.Hovered() {
+					syncBtn.Background(p.cardHover)
+				}
+			}
+			syncBtn.Children(func() {
+				if snap.Syncing {
+					ui.Spinner(c).Size(13, 13)
+				} else {
+					ui.Icon(c, svgRefresh).Size(14, 14).TextColor(p.textSecondary)
+				}
+			})
+			if !snap.Syncing && syncBtn.Clicked() {
+				vm.runAsync(func() error {
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					defer cancel()
+					_, err := vm.app.eng.SyncCustomRules(ctx)
+					return err
+				}, "云端规则已同步")
+			}
+		}
 	})
 
 	// 3. 若有多个规则分组标签，显示分组启停药丸栏
@@ -152,8 +191,8 @@ func (vm *viewModel) renderRulesView(c *ui.Context, p palette) {
 				if lbl == config.DefaultRuleActiveSentinel {
 					name = "默认"
 				}
-				chip := ui.Row(c.Key("rlbl-" + lbl)).Padding(2.5, 8).Radius(99).
-					Cursor(ui.CursorPointer).AlignItems(ui.Center).Tooltip("点击启停该规则分组")
+				chip := ui.Row(c.Key("rlbl-"+lbl)).Padding(2.5, 8).Radius(99).
+					Cursor(ui.CursorPointer).AlignItems(ui.Center).Tooltip("切换分组")
 				if isOn {
 					chip.Background(p.accentSoft).Border(1, p.borderStrong)
 				} else {
@@ -180,18 +219,23 @@ func (vm *viewModel) renderRulesView(c *ui.Context, p palette) {
 
 	filtered := vm.filteredRules()
 	ui.Row(c).AlignItems(ui.Center).Padding(0, 2).Children(func() {
-		ui.Text(c, fmt.Sprintf("自定义规则 %d 条（显示 %d 条）· 总生效规则 %d 条",
-			len(snap.CustomRules), len(filtered), snap.RuleCount)).
-			FontSize(11).TextColor(p.textMuted)
+		summary := fmt.Sprintf("自定义 %d 条 · 生效 %d 条", len(snap.CustomRules), snap.RuleCount)
+		if len(filtered) != len(snap.CustomRules) {
+			summary = fmt.Sprintf("显示 %d / %d 条 · 生效 %d 条", len(filtered), len(snap.CustomRules), snap.RuleCount)
+		}
+		ui.Text(c, summary).FontSize(11).TextColor(p.textMuted)
 	})
 
-	// 4. 紧凑规则列表
-	ui.Scroll(c.Key("rules-scroll")).Grow(1).Children(func() {
-		ui.Column(c).Gap(5).Padding(0, 2, 6, 0).Children(func() {
+	// 4. 紧凑规则列表（右侧独立细滚动条槽道）
+	ui.Scroll(c.Key("rules-scroll")).Grow(1).Margin(0, -10, 0, 0).Children(func() {
+		ui.Column(c).Gap(5).Padding(0, 10, 6, 0).Children(func() {
 			if len(filtered) == 0 {
-				ui.Column(c).Padding(28, 16).Center().Gap(6).Children(func() {
-					ui.Text(c, "暂无匹配的自定义规则").FontSize(13).Bold().TextColor(p.textSecondary)
-					ui.Text(c, "可在上方快速输入域名添加，或去「连接」页一键导入").FontSize(11.5).TextColor(p.textMuted)
+				emptyText := "无匹配规则"
+				if len(snap.CustomRules) == 0 {
+					emptyText = "暂无自定义规则"
+				}
+				ui.Column(c).Padding(28, 16).Center().Children(func() {
+					ui.Text(c, emptyText).FontSize(12.5).TextColor(p.textMuted)
 				})
 				return
 			}
@@ -242,7 +286,19 @@ func (vm *viewModel) renderRuleRow(c *ui.Context, p palette, rule config.DomainR
 		actFg, actBg := ruleActionColors(rule.ProxyType, p)
 		renderPill(c, config.RuleActionLabel(rule.ProxyType), actFg, actBg)
 
-		editBtn := ui.Button(c.Key("edit"), "改").Padding(3, 7).Radius(6).Tooltip("编辑此规则")
+		editBtn := ui.Box(c.Key("edit")).Size(26, 26).Center().Radius(6).
+			Cursor(ui.CursorPointer).Label("编辑").Tooltip("编辑")
+		editColor := p.textMuted
+		if vm.editingRuleID == rule.ID {
+			editBtn.Background(p.accentSoft)
+			editColor = p.accent
+		} else if editBtn.Hovered() {
+			editBtn.Background(p.pillBg)
+			editColor = p.text
+		}
+		editBtn.Children(func() {
+			ui.Icon(c, svgEdit).Size(13.5, 13.5).TextColor(editColor)
+		})
 		if editBtn.Clicked() {
 			vm.editingRuleID = rule.ID
 			vm.ruleDomainDraft = rule.Domain
@@ -251,7 +307,16 @@ func (vm *viewModel) renderRuleRow(c *ui.Context, p palette, rule config.DomainR
 			vm.ruleLabelDraft = rule.Label
 		}
 
-		delBtn := ui.Button(c.Key("del"), "删").Padding(3, 7).Radius(6).TextColor(p.danger).Tooltip("删除此规则")
+		delBtn := ui.Box(c.Key("del")).Size(26, 26).Center().Radius(6).
+			Cursor(ui.CursorPointer).Label("删除").Tooltip("删除")
+		delColor := p.textMuted
+		if delBtn.Hovered() {
+			delBtn.Background(p.dangerSoft)
+			delColor = p.danger
+		}
+		delBtn.Children(func() {
+			ui.Icon(c, svgTrash).Size(13.5, 13.5).TextColor(delColor)
+		})
 		if delBtn.Clicked() {
 			id := rule.ID
 			dom := rule.Domain
@@ -260,7 +325,7 @@ func (vm *viewModel) renderRuleRow(c *ui.Context, p palette, rule config.DomainR
 			}
 			vm.runAsync(func() error {
 				return vm.app.eng.DeleteCustomRule(id)
-			}, "已删除规则 "+dom)
+			}, "已删除 "+dom)
 		}
 	})
 }
@@ -268,7 +333,7 @@ func (vm *viewModel) renderRuleRow(c *ui.Context, p palette, rule config.DomainR
 func (vm *viewModel) submitRuleDraft() {
 	dom := strings.TrimSpace(vm.ruleDomainDraft)
 	if dom == "" {
-		vm.toastMsg = "请先输入域名、IP 或关键词"
+		vm.toastMsg = "请输入规则内容"
 		return
 	}
 
@@ -300,14 +365,14 @@ func (vm *viewModel) submitRuleDraft() {
 		vm.runAsync(func() error {
 			_, err := vm.app.eng.UpdateCustomRule(rule)
 			return err
-		}, fmt.Sprintf("已更新规则 %s（已热生效）", rule.Domain))
+		}, "已更新 "+rule.Domain)
 		return
 	}
 
 	vm.runAsync(func() error {
 		_, err := vm.app.eng.AddCustomRule(rule)
 		return err
-	}, fmt.Sprintf("已添加规则 %s -> %s（已热生效）", rule.Domain, config.RuleActionLabel(rule.ProxyType)))
+	}, "已添加 "+rule.Domain)
 }
 
 func (vm *viewModel) resetRuleDraft() {

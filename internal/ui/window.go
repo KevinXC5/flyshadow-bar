@@ -11,6 +11,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"github.com/egoist/mygo/ui/chart"
 
 	"github.com/KevinXC5/flyshadow-bar/internal/cliinstall"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
@@ -47,6 +48,13 @@ type viewModel struct {
 	connections     []core.ConnectionInfo
 	connSearchQuery string
 	connsPaused     bool
+
+	// 订阅密码配置弹窗状态
+	subModalOpen     bool
+	subPasswordDraft string
+	subPasswordShow  bool
+	subSaving        bool
+	subModalErr      string
 
 	checkingUpdate      bool
 	updateNativeEnabled bool
@@ -162,8 +170,17 @@ func paletteFor(dark bool) palette {
 
 func (vm *viewModel) render(c *ui.Context) {
 	if vm.app != nil {
-		if c.Shortcut(ui.Cmd, ui.KeyW) || c.Shortcut(0, ui.KeyEscape) {
+		if c.Shortcut(ui.Cmd, ui.KeyW) {
 			vm.app.hideWindow()
+		} else if c.Shortcut(0, ui.KeyEscape) {
+			if vm.subModalOpen {
+				if !vm.subSaving {
+					vm.subModalOpen = false
+					vm.subModalErr = ""
+				}
+			} else {
+				vm.app.hideWindow()
+			}
 		}
 		c.OnShortcut(ui.Cmd, ui.KeyQ, mygo.App.Quit)
 	}
@@ -179,6 +196,21 @@ func (vm *viewModel) render(c *ui.Context) {
 	themed.Background = p.canvas
 	themed.Radius = 9
 	themed.Spacing = 3.2
+	// 全局采用精致细滚动条，配合列表右侧外置槽道，绝不遮挡高亮卡片边框
+	thumbBase := ui.RGBA(15, 23, 42, 0.22)
+	thumbHover := ui.RGBA(15, 23, 42, 0.42)
+	if base.Dark {
+		thumbBase = ui.RGBA(255, 255, 255, 0.18)
+		thumbHover = ui.RGBA(255, 255, 255, 0.36)
+	}
+	themed.ScrollbarStyle = ui.ScrollbarStyle{
+		TrackWidth: 8,
+		ThumbWidth: 3.5,
+		MinLength:  24,
+		Thumb:      thumbBase,
+		Hover:      thumbHover,
+		Active:     thumbHover,
+	}
 	c.SetTheme(&themed)
 
 	ui.Column(c).Fill().Background(p.canvas).Children(func() {
@@ -200,13 +232,16 @@ func (vm *viewModel) render(c *ui.Context) {
 			}
 		})
 	})
+
+	vm.renderSubscribeModal(c, p)
 }
 
 func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 	bar := c.TitleBar()
 	h := max(bar.Height, 40)
-	leftPad := bar.Left + 12
-	rightPad := bar.Right + 12
+	// 与下方主内容区左右 14px 内边距保持严格像素对齐
+	leftPad := max(bar.Left+12, 14)
+	rightPad := max(bar.Right+12, 14)
 
 	ui.Row(c).Height(h).Padding(0, rightPad, 0, leftPad).AlignItems(ui.Center).Gap(8).
 		DragWindow().Children(func() {
@@ -226,24 +261,24 @@ func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 	})
 }
 
-// renderUpdateReadyBanner 当后台静默增量更新安装完成后，在弹窗最醒目的顶部位置提示用户一键重启生效。
+// renderUpdateReadyBanner 当后台静默更新安装完成后，在弹窗顶部提示一键重启生效。
 func (vm *viewModel) renderUpdateReadyBanner(c *ui.Context, p palette) {
 	ui.Row(c).Padding(8, 12).Gap(10).Radius(11).AlignItems(ui.Center).
 		Background(p.successSoft).Border(1, p.success).Children(func() {
 		ui.Box(c).Size(8, 8).Radius(99).Background(p.success)
 		ui.Column(c).Grow(1).Gap(1).Children(func() {
-			ui.Text(c, fmt.Sprintf("新版本 %s 已下载就绪", vm.updateAvailable)).
+			ui.Text(c, fmt.Sprintf("新版本 %s 已就绪", vm.updateAvailable)).
 				FontSize(12.5).Bold().TextColor(p.success)
-			ui.Text(c, "增量更新已验签完成，重启后即可生效").
+			ui.Text(c, "重启后生效").
 				FontSize(10.5).TextColor(p.textSecondary)
 		})
-		if ui.PrimaryButton(c.Key("btn-banner-restart"), "重启更新").Padding(5, 12).Radius(7).Clicked() {
+		if ui.PrimaryButton(c.Key("btn-banner-restart"), "立即重启").Padding(5, 12).Radius(7).Clicked() {
 			vm.restartForUpdate()
 		}
 	})
 }
 
-// renderCompactOverview 紧凑高密度顶部状态区，为下方列表留出更大单屏视野。
+// renderCompactOverview 紧凑高密度顶部概览区：当前节点 + 实时速率折线图 + 订阅流量条 + 模式与快捷开关。
 func (vm *viewModel) renderCompactOverview(c *ui.Context, p palette) {
 	snap := vm.snap
 	nodeName := "未选择节点"
@@ -251,66 +286,51 @@ func (vm *viewModel) renderCompactOverview(c *ui.Context, p palette) {
 		nodeName = snap.CurrentNode.DisplayName
 	}
 
-	ui.Column(c).Padding(10, 12).Gap(8).Radius(13).
+	ui.Column(c).Padding(11, 12).Gap(9).Radius(13).
 		Background(p.card).Border(1, p.border).
 		Shadow(0, 1, 6, 0, ui.RGBA(0, 0, 0, 0.04)).Children(func() {
 
-		// 第一行：节点名 + 状态/协议胶囊 + 紧凑实时指标 + 端口复制 + 连接/断开按钮
+		// 第一行：状态胶囊 + 当前节点名 + 协议标签 + 电源主开关
 		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-			ui.Column(c).Grow(1).Gap(4).Children(func() {
-				ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
-					renderPill(c, StateLabel(snap.State), stateDotColor(snap.State, p), stateBgColor(snap.State, p))
-					ui.Text(c, nodeName).Grow(1).FontSize(14).Bold().TextColor(p.text).Ellipsis("…")
-					if snap.EffectiveTransport.EnableQuic {
-						renderMiniTag(c, "QUIC", p.accent, p.accentSoft)
-					}
-					if snap.EffectiveTransport.EnableNativeUDP {
-						renderMiniTag(c, "UDP", p.success, p.successSoft)
-					}
-				})
-
-				// 紧凑一行实时指标条
-				ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
-					ui.Text(c, "↑ "+FormatSpeed(snap.UploadSpeedBps)).FontSize(11).TextColor(p.textSecondary).NoWrap()
-					ui.Text(c, "↓ "+FormatSpeed(snap.DownloadSpeedBps)).FontSize(11).TextColor(p.textSecondary).NoWrap()
-
-					pingVal := "--"
-					if snap.State == engine.StateConnected {
-						if snap.TunnelPingMs > 0 {
-							pingVal = fmt.Sprintf("%d ms", snap.TunnelPingMs)
-						} else if snap.CurrentNode != nil && snap.CurrentNode.DelayMs > 0 {
-							pingVal = fmt.Sprintf("%d ms", snap.CurrentNode.DelayMs)
-						}
-					}
-					ui.Text(c, "延迟 "+pingVal).FontSize(11).TextColor(p.textMuted).NoWrap()
-
-					proxyChip := ui.Row(c.Key("copy-proxy")).Padding(1.5, 6).Radius(5).
-						Background(p.cardElevated).Border(1, p.border).AlignItems(ui.Center).Gap(4).
-						Cursor(ui.CursorPointer).Tooltip("点击复制终端代理导出命令")
-					if proxyChip.Hovered() {
-						proxyChip.Background(p.cardHover)
-					}
-					proxyChip.Children(func() {
-						ui.Text(c, fmt.Sprintf(":%d", snap.ProxyPort)).FontSize(10.5).Bold().TextColor(p.textSecondary).NoWrap()
-						ui.Icon(c, svgCopy).Size(10, 10).TextColor(p.textMuted)
-					})
-					if proxyChip.Clicked() {
-						cmd := fmt.Sprintf("export http_proxy=http://127.0.0.1:%d https_proxy=http://127.0.0.1:%d all_proxy=socks5://127.0.0.1:%d",
-							snap.ProxyPort, snap.ProxyPort, snap.ProxyPort)
-						if vm.app != nil {
-							mygo.Clipboard.WriteText(cmd)
-						}
-						vm.toastMsg = fmt.Sprintf("已复制代理命令（端口 %d）", snap.ProxyPort)
-					}
-				})
+			ui.Row(c).Grow(1).AlignItems(ui.Center).Gap(6).Children(func() {
+				renderPill(c, StateLabel(snap.State), stateDotColor(snap.State, p), stateBgColor(snap.State, p))
+				ui.Text(c, nodeName).Grow(1).FontSize(14).Bold().TextColor(p.text).Ellipsis("…")
+				if snap.EffectiveTransport.EnableQuic {
+					renderMiniTag(c, "QUIC", p.accent, p.accentSoft)
+				}
+				if snap.EffectiveTransport.EnableNativeUDP {
+					renderMiniTag(c, "UDP", p.success, p.successSoft)
+				}
 			})
 
 			if snap.State == engine.StateConnected || snap.State == engine.StateConnecting {
-				if ui.Button(c.Key("btn-disconnect"), "断开").Padding(5, 11).Radius(7).Clicked() {
-					vm.runAsync(func() error { return vm.app.eng.Disconnect() }, "已断开隧道")
+				pwrBtn := ui.Box(c.Key("btn-disconnect")).Size(32, 32).Radius(9.5).Center().
+					Background(p.dangerSoft).Border(1, p.danger).Cursor(ui.CursorPointer).
+					Label("断开").Tooltip("断开")
+				if pwrBtn.Hovered() {
+					pwrBtn.Background(p.danger)
+					pwrBtn.Children(func() {
+						ui.Icon(c, svgPower).Size(15, 15).TextColor(ui.Hex("#ffffff"))
+					})
+				} else {
+					pwrBtn.Children(func() {
+						ui.Icon(c, svgPower).Size(15, 15).TextColor(p.danger)
+					})
+				}
+				if pwrBtn.Clicked() {
+					vm.runAsync(func() error { return vm.app.eng.Disconnect() }, "已断开")
 				}
 			} else {
-				if ui.PrimaryButton(c.Key("btn-connect"), "连接").Padding(5, 12).Radius(7).Clicked() {
+				pwrBtn := ui.Box(c.Key("btn-connect")).Size(32, 32).Radius(9.5).Center().
+					Background(p.accent).Cursor(ui.CursorPointer).
+					Label("连接").Tooltip("连接")
+				if pwrBtn.Hovered() {
+					pwrBtn.Opacity(0.9)
+				}
+				pwrBtn.Children(func() {
+					ui.Icon(c, svgPower).Size(15, 15).TextColor(ui.Hex("#ffffff"))
+				})
+				if pwrBtn.Clicked() {
 					vm.runAsync(func() error { return vm.app.eng.Connect() }, "")
 				}
 			}
@@ -322,10 +342,16 @@ func (vm *viewModel) renderCompactOverview(c *ui.Context, p palette) {
 			})
 		}
 
-		// 第二行：代理模式三等分切换栏
+		// 第二行：实时速率折线图（左宽）与订阅流量卡（右窄）并排等高展示
+		ui.Row(c).Gap(8).AlignItems(ui.Stretch).Children(func() {
+			vm.renderSpeedChart(c, p, snap)
+			vm.renderSubscriptionCard(c, p, snap)
+		})
+
+		// 第三行：代理模式三等分切换栏
 		vm.renderModeBar(c, p, snap.ModeCode)
 
-		// 第三行：三个紧凑快捷开关（系统代理 / UDP 加速 / 原生 UDP）
+		// 第四行：三个紧凑快捷开关（系统代理 / UDP 加速 / 原生 UDP）
 		ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
 			sysOn := snap.SystemProxy
 			vm.renderQuickToggle(c, p, "qt-sysproxy", "系统代理", &sysOn, func(v bool) {
@@ -343,14 +369,358 @@ func (vm *viewModel) renderCompactOverview(c *ui.Context, p palette) {
 	})
 }
 
+// renderSpeedChart 绘制实时上下行速率折线面积图，顶部紧凑显示实时速率与延迟。
+func (vm *viewModel) renderSpeedChart(c *ui.Context, p palette, snap engine.Snapshot) {
+	pingVal := "--"
+	if snap.State == engine.StateConnected {
+		if snap.TunnelPingMs > 0 {
+			pingVal = fmt.Sprintf("%d ms", snap.TunnelPingMs)
+		} else if snap.CurrentNode != nil && snap.CurrentNode.DelayMs > 0 {
+			pingVal = fmt.Sprintf("%d ms", snap.CurrentNode.DelayMs)
+		}
+	}
+
+	samples := snap.SpeedHistory
+	if len(samples) < 2 {
+		samples = make([]engine.SpeedSample, 24)
+		samples[len(samples)-1] = engine.SpeedSample{
+			UploadBps:   snap.UploadSpeedBps,
+			DownloadBps: snap.DownloadSpeedBps,
+		}
+	}
+
+	// 计算纵轴自适应上限（保底 64 KB/s，避免极低背景流量把曲线拉满抖动）
+	peak := float64(64 * 1024)
+	for _, s := range samples {
+		if float64(s.DownloadBps) > peak {
+			peak = float64(s.DownloadBps)
+		}
+		if float64(s.UploadBps) > peak {
+			peak = float64(s.UploadBps)
+		}
+	}
+	peak *= 1.18
+
+	n := len(samples)
+	xs := make([]float32, n)
+	ysDown := make([]float32, n)
+	ysUp := make([]float32, n)
+	for i, s := range samples {
+		xs[i] = float32(i) / float32(n-1)
+		ysDown[i] = float32(min(1.0, max(0.0, float64(s.DownloadBps)/peak)))
+		ysUp[i] = float32(min(1.0, max(0.0, float64(s.UploadBps)/peak)))
+	}
+
+	ui.Column(c).Grow(1).MinWidth(0).Padding(8, 10, 7, 10).Gap(5).Radius(9.5).
+		Background(p.cardElevated).Border(1, p.border).Children(func() {
+		// 顶部实时读数行
+		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Row(c).AlignItems(ui.Center).Gap(4).Children(func() {
+				ui.Box(c).Size(6, 6).Radius(99).Background(p.accent)
+				ui.Text(c, "↓ "+FormatSpeed(snap.DownloadSpeedBps)).FontSize(11).Bold().TextColor(p.textSecondary).NoWrap()
+			})
+			ui.Row(c).AlignItems(ui.Center).Gap(4).Children(func() {
+				ui.Box(c).Size(6, 6).Radius(99).Background(p.success)
+				ui.Text(c, "↑ "+FormatSpeed(snap.UploadSpeedBps)).FontSize(11).TextColor(p.textSecondary).NoWrap()
+			})
+			ui.Spacer(c)
+			ui.Text(c, pingVal).FontSize(10.5).TextColor(p.textMuted).NoWrap().Tooltip("隧道延迟")
+		})
+
+		// 折线面积图画布（随右侧卡片等高舒展）
+		ui.Box(c).Grow(1).MinHeight(46).Draw(func(pt *ui.Painter, r ui.Rect) {
+			if r.W <= 2 || r.H <= 2 {
+				return
+			}
+			// 留出上下 2px 呼吸边距，防止顶部峰值描边被裁切
+			plot := ui.Rect{X: r.X, Y: r.Y + 2, W: r.W, H: r.H - 4}
+			gridColor := p.border
+			pt.Line(plot.X, plot.Y+plot.H*0.5, plot.X+plot.W, plot.Y+plot.H*0.5, 0.75, gridColor)
+			pt.Line(plot.X, plot.Y+plot.H, plot.X+plot.W, plot.Y+plot.H, 0.75, gridColor)
+
+			// 下行面积 + 主折线（靛青蓝）
+			if areaDown := chart.Area(plot, xs, nil, ysDown, chart.CurveMonotone); areaDown != nil {
+				pt.FillPathGradient(areaDown, ui.LinearGradient{
+					From:  p.accent.Alpha(0.24),
+					To:    p.accent.Alpha(0.01),
+					Angle: 180,
+				})
+			}
+			if lineDown := chart.Line(plot, xs, ysDown, chart.CurveMonotone); lineDown != nil {
+				pt.StrokePath(lineDown, 1.6, p.accent)
+			}
+
+			// 上行面积 + 细折线（翡翠绿）
+			if areaUp := chart.Area(plot, xs, nil, ysUp, chart.CurveMonotone); areaUp != nil {
+				pt.FillPathGradient(areaUp, ui.LinearGradient{
+					From:  p.success.Alpha(0.14),
+					To:    p.success.Alpha(0.0),
+					Angle: 180,
+				})
+			}
+			if lineUp := chart.Line(plot, xs, ysUp, chart.CurveMonotone); lineUp != nil {
+				pt.StrokePath(lineUp, 1.25, p.success)
+			}
+		})
+	})
+}
+
+// renderSubscriptionCard 右侧紧凑订阅流量卡，与左侧实时速率图并排等高。
+func (vm *viewModel) renderSubscriptionCard(c *ui.Context, p palette, snap engine.Snapshot) {
+	ui.Column(c).Width(176).Padding(8, 10, 7, 10).Gap(5).Radius(9.5).
+		Background(p.cardElevated).Border(1, p.border).Children(func() {
+		// 第一行：VIP 徽标 / 标题 + 订阅密码设置与同步图标按钮
+		ui.Row(c).AlignItems(ui.Center).Gap(3).Children(func() {
+			if snap.Traffic != nil && snap.Traffic.Level > 0 {
+				renderMiniTag(c, fmt.Sprintf("VIP %d", snap.Traffic.Level), p.accent, p.accentSoft)
+			} else {
+				ui.Text(c, "订阅").FontSize(10.5).Bold().TextColor(p.textMuted).NoWrap()
+			}
+			ui.Spacer(c)
+
+			// 钥匙图标：弹窗填写或更换订阅密码
+			keyTip := "配置订阅密码"
+			if snap.HasCloudAuth {
+				keyTip = "更换订阅密码"
+			}
+			keyBtn := ui.Box(c.Key("btn-sub-config")).Size(20, 20).Radius(5).Center().
+				Cursor(ui.CursorPointer).Label("配置订阅密码").Tooltip(keyTip)
+			if keyBtn.Hovered() {
+				keyBtn.Background(p.pillBg)
+			}
+			keyBtn.Children(func() {
+				ui.Icon(c, svgKey).Size(12, 12).TextColor(p.textSecondary)
+			})
+			if keyBtn.Clicked() {
+				vm.openSubscribeModal()
+			}
+
+			if snap.HasCloudAuth {
+				syncBtn := ui.Box(c.Key("btn-sync-sub")).Size(20, 20).Radius(5).Center().
+					Label("同步订阅").Tooltip("同步订阅与规则")
+				if snap.Syncing {
+					syncBtn.Background(p.accentSoft)
+				} else {
+					syncBtn.Cursor(ui.CursorPointer)
+					if syncBtn.Hovered() {
+						syncBtn.Background(p.pillBg)
+					}
+				}
+				syncBtn.Children(func() {
+					if snap.Syncing {
+						ui.Spinner(c).Size(10.5, 10.5)
+					} else {
+						ui.Icon(c, svgRefresh).Size(12, 12).TextColor(p.textSecondary)
+					}
+				})
+				if !snap.Syncing && syncBtn.Clicked() {
+					vm.runAsync(func() error {
+						ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+						defer cancel()
+						_, err := vm.app.eng.SyncSubscription(ctx)
+						return err
+					}, "订阅已同步")
+				}
+			}
+		})
+
+		if snap.Traffic != nil && snap.Traffic.TrafficSize > 0 {
+			used := snap.Traffic.TrafficUpload + snap.Traffic.TrafficDownload
+			ratio := min(1.0, max(0.0, float64(used)/float64(snap.Traffic.TrafficSize)))
+			usageColor := p.text
+			barColor := p.accent
+			if ratio >= 0.90 {
+				usageColor = p.danger
+				barColor = p.danger
+			} else if ratio >= 0.75 {
+				usageColor = p.warning
+				barColor = p.warning
+			}
+
+			// 第二行：已用 / 总流量
+			ui.Row(c).AlignItems(ui.Baseline).Gap(3).Children(func() {
+				ui.Text(c, FormatBytes(used)).FontSize(12).Bold().TextColor(usageColor).NoWrap()
+				ui.Text(c, "/ "+FormatBytes(snap.Traffic.TrafficSize)).FontSize(10).TextColor(p.textMuted).Ellipsis("…")
+			})
+
+			// 第三行：圆角进度条
+			ui.Box(c).Height(4).Radius(99).Background(p.pillBg).Draw(func(pt *ui.Painter, r ui.Rect) {
+				if r.W <= 0 || ratio <= 0 {
+					return
+				}
+				fillW := max(float32(4), r.W*float32(ratio))
+				if fillW > r.W {
+					fillW = r.W
+				}
+				pt.Fill(ui.Rect{X: r.X, Y: r.Y, W: fillW, H: r.H}, barColor, 99)
+			})
+
+			// 第四行：到期时间
+			if snap.Traffic.ExpireTime > 0 {
+				ui.Text(c, "到期 "+FormatExpireDate(int64(snap.Traffic.ExpireTime))).
+					FontSize(10).TextColor(p.textMuted).NoWrap()
+			}
+		} else if snap.HasCloudAuth {
+			ui.Spacer(c)
+			ui.Text(c, "点击右上角同步").FontSize(10.5).TextColor(p.textMuted).NoWrap()
+		} else {
+			ui.Spacer(c)
+			setupBtn := ui.Row(c.Key("btn-sub-setup-inline")).Padding(4, 8).Radius(6).
+				Background(p.accentSoft).AlignItems(ui.Center).Center().Cursor(ui.CursorPointer).
+				Label("填写订阅密码").Children(func() {
+				ui.Text(c, "填写订阅密码").FontSize(10.5).Bold().TextColor(p.accent).NoWrap()
+			})
+			if setupBtn.Clicked() {
+				vm.openSubscribeModal()
+			}
+		}
+	})
+}
+
+func (vm *viewModel) openSubscribeModal() {
+	vm.subModalOpen = true
+	vm.subPasswordDraft = ""
+	vm.subPasswordShow = false
+	vm.subModalErr = ""
+}
+
+// renderSubscribeModal 绘制配置/更换订阅密码的模态弹窗。
+func (vm *viewModel) renderSubscribeModal(c *ui.Context, p palette) {
+	if !vm.subModalOpen {
+		return
+	}
+	modal := ui.Modal(c.Key("sub-password-modal"), &vm.subModalOpen, func() {
+		ui.Column(c).Width(356).Padding(16).Gap(12).Radius(13).
+			Background(p.card).Border(1, p.borderStrong).Children(func() {
+			// 标题栏
+			ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
+				ui.Box(c).Size(24, 24).Radius(7).Background(p.accentSoft).Center().Children(func() {
+					ui.Icon(c, svgKey).Size(13, 13).TextColor(p.accent)
+				})
+				title := "配置订阅密码"
+				if vm.snap.HasCloudAuth {
+					title = "更换订阅密码"
+				}
+				ui.Text(c, title).FontSize(14).Bold().TextColor(p.text)
+				ui.Spacer(c)
+				closeBtn := ui.Box(c.Key("btn-sub-modal-close")).Size(24, 24).Radius(6).Center().
+					Cursor(ui.CursorPointer).Label("关闭").Tooltip("关闭")
+				if closeBtn.Hovered() {
+					closeBtn.Background(p.pillBg)
+				}
+				closeBtn.Children(func() {
+					ui.Icon(c, svgClose).Size(13, 13).TextColor(p.textMuted)
+				})
+				if !vm.subSaving && closeBtn.Clicked() {
+					vm.subModalOpen = false
+					vm.subModalErr = ""
+				}
+			})
+
+			ui.Text(c, "输入订阅密码后将自动校验，并同步节点、套餐流量与云端规则。").
+				FontSize(11.5).TextColor(p.textMuted).Wrap()
+
+			// 密码输入行（支持掩码切换与回车直接提交）
+			ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
+				inp := ui.TextInput(c.Key("sub-pw-input"), &vm.subPasswordDraft).
+					Grow(1).Placeholder("请输入订阅密码").AutoFocus()
+				if !vm.subPasswordShow {
+					inp.Password()
+				}
+				if inp.Submitted() && !vm.subSaving {
+					vm.submitSubscribePassword()
+				}
+
+				eyeIcon := svgEye
+				eyeTip := "显示密码"
+				if vm.subPasswordShow {
+					eyeIcon = svgEyeOff
+					eyeTip = "隐藏密码"
+				}
+				eyeBtn := ui.Box(c.Key("btn-sub-pw-eye")).Size(30, 30).Radius(7).Center().
+					Background(p.cardElevated).Border(1, p.border).Cursor(ui.CursorPointer).
+					Label(eyeTip).Tooltip(eyeTip)
+				if eyeBtn.Hovered() {
+					eyeBtn.Background(p.cardHover)
+				}
+				eyeBtn.Children(func() {
+					ui.Icon(c, eyeIcon).Size(14, 14).TextColor(p.textSecondary)
+				})
+				if eyeBtn.Clicked() {
+					vm.subPasswordShow = !vm.subPasswordShow
+				}
+			})
+
+			if vm.subModalErr != "" {
+				ui.Row(c).Padding(6, 9).Radius(7).Background(p.dangerSoft).Children(func() {
+					ui.Text(c, vm.subModalErr).FontSize(11).TextColor(p.danger).Wrap()
+				})
+			}
+
+			// 底部操作按钮
+			ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+				ui.Spacer(c)
+				if ui.Button(c.Key("btn-sub-cancel"), "取消").Padding(6, 14).Radius(7).
+					Disabled(vm.subSaving).Clicked() {
+					vm.subModalOpen = false
+					vm.subModalErr = ""
+				}
+				saveLabel := "保存并同步"
+				if vm.subSaving {
+					saveLabel = "校验中…"
+				}
+				if ui.PrimaryButton(c.Key("btn-sub-save"), saveLabel).Padding(6, 14).Radius(7).
+					Disabled(vm.subSaving || strings.TrimSpace(vm.subPasswordDraft) == "").Clicked() {
+					vm.submitSubscribePassword()
+				}
+			})
+		})
+	})
+	if modal.Dismissed() && vm.subSaving {
+		// 正在校验同步期间防止误触背景关闭弹窗
+		vm.subModalOpen = true
+	}
+}
+
+func (vm *viewModel) submitSubscribePassword() {
+	pw := strings.TrimSpace(vm.subPasswordDraft)
+	if pw == "" {
+		vm.subModalErr = "请输入订阅密码"
+		return
+	}
+	if vm.app == nil || vm.app.eng == nil {
+		return
+	}
+	vm.subSaving = true
+	vm.subModalErr = ""
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		_, err := vm.app.eng.SetSubscribePassword(ctx, pw)
+		vm.app.updateWindow(func() {
+			vm.subSaving = false
+			if err != nil {
+				vm.subModalErr = err.Error()
+				return
+			}
+			vm.subPasswordDraft = ""
+			vm.subPasswordShow = false
+			vm.subModalErr = ""
+			vm.subModalOpen = false
+			vm.toastMsg = "订阅已配置并同步"
+		})
+	}()
+}
+
 func (vm *viewModel) renderModeBar(c *ui.Context, p palette, active core.ProxyMode) {
 	options := []struct {
 		mode  core.ProxyMode
 		label string
 	}{
-		{core.ProxyModeRule, "规则 Rule"},
-		{core.ProxyModeGlobal, "全局 Global"},
-		{core.ProxyModeDirect, "直连 Direct"},
+		{core.ProxyModeRule, "规则"},
+		{core.ProxyModeGlobal, "全局"},
+		{core.ProxyModeDirect, "直连"},
 	}
 
 	ui.Row(c.Key("mode-bar")).Padding(2.5).Gap(2.5).Radius(9).
@@ -400,65 +770,78 @@ func (vm *viewModel) renderQuickToggle(c *ui.Context, p palette, key, label stri
 func (vm *viewModel) renderNodesView(c *ui.Context, p palette) {
 	snap := vm.snap
 
-	// 搜索与筛选工具栏
+	// 搜索与图标工具栏
 	ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
-		ui.SearchField(c.Key("node-search"), &vm.searchQuery).Grow(1).Placeholder("搜索节点名称、地区或备注…")
+		ui.SearchField(c.Key("node-search"), &vm.searchQuery).Grow(1).Placeholder("搜索节点…")
 
-		starBtn := ui.Button(c.Key("filter-star"), "收藏").Padding(5, 9).Radius(7)
+		starTip := "只看收藏"
+		starIcon := svgStarOutline
 		if vm.onlyStarred {
-			starBtn.Background(p.warningSoft).Border(1, p.warning).TextColor(p.warning)
+			starTip = "显示全部"
+			starIcon = svgStarFilled
 		}
-		if starBtn.Clicked() {
+		if renderToolbarIconBtn(c, p, "filter-star", "收藏", starTip, starIcon, vm.onlyStarred, p.starGold, p.warningSoft, p.warning, false) {
 			vm.onlyStarred = !vm.onlyStarred
 		}
 
-		sortLabel := "默认"
+		sortTip := "按延迟排序"
 		if vm.sortByDelay {
-			sortLabel = "延迟↑"
+			sortTip = "默认排序"
 		}
-		sortBtn := ui.Button(c.Key("sort-nodes"), sortLabel).Padding(5, 9).Radius(7)
-		if vm.sortByDelay {
-			sortBtn.Background(p.accentSoft).Border(1, p.borderStrong).TextColor(p.accent)
-		}
-		if sortBtn.Clicked() {
+		if renderToolbarIconBtn(c, p, "sort-nodes", "按延迟排序", sortTip, svgSortAsc, vm.sortByDelay, p.accent, p.accentSoft, p.borderStrong, false) {
 			vm.sortByDelay = !vm.sortByDelay
 		}
 
-		pingText := "测速"
+		pingBtn := ui.Box(c.Key("btn-ping")).Size(30, 30).Radius(8).Center().
+			Background(p.card).Border(1, p.border).Label("测速").Tooltip("测速")
 		if snap.Pinging {
-			pingText = fmt.Sprintf("%d/%d", snap.PingCompleted, snap.PingTotal)
+			pingBtn.Background(p.accentSoft).Border(1, p.borderStrong).Opacity(0.85)
+		} else {
+			pingBtn.Cursor(ui.CursorPointer)
+			if pingBtn.Hovered() {
+				pingBtn.Background(p.cardHover)
+			}
 		}
-		pingBtn := ui.Button(c.Key("btn-ping"), pingText).Disabled(snap.Pinging).Padding(5, 9).Radius(7)
-		if pingBtn.Clicked() {
+		pingBtn.Children(func() {
+			if snap.Pinging {
+				ui.Spinner(c).Size(13, 13)
+			} else {
+				ui.Icon(c, svgGauge).Size(14.5, 14.5).TextColor(p.textSecondary)
+			}
+		})
+		if !snap.Pinging && pingBtn.Clicked() {
 			vm.runAsync(func() error {
 				_, err := vm.app.eng.PingAll(context.Background())
 				return err
-			}, "全部节点测速完成")
+			}, "测速完成")
 		}
 	})
 
 	filtered := vm.filteredNodes()
 
-	// 节点统计摘要行
+	// 节点统计摘要行（未筛选时只显示总数，避免重复）
 	ui.Row(c).AlignItems(ui.Center).Padding(0, 2).Children(func() {
-		ui.Text(c, fmt.Sprintf("共 %d 个节点（显示 %d 个）", len(snap.Nodes), len(filtered))).
-			FontSize(10.5).TextColor(p.textMuted)
+		summary := fmt.Sprintf("共 %d 个节点", len(snap.Nodes))
+		if len(filtered) != len(snap.Nodes) {
+			summary = fmt.Sprintf("显示 %d / %d 个节点", len(filtered), len(snap.Nodes))
+		}
+		ui.Text(c, summary).FontSize(10.5).TextColor(p.textMuted)
 		ui.Spacer(c)
 		if snap.Pinging {
-			ui.Row(c).AlignItems(ui.Center).Gap(5).Children(func() {
-				ui.Spinner(c).Size(11, 11)
-				ui.Text(c, "并发测速中…").FontSize(10.5).TextColor(p.accent)
-			})
+			ui.Text(c, fmt.Sprintf("%d/%d", snap.PingCompleted, snap.PingTotal)).FontSize(10.5).TextColor(p.accent)
 		}
 	})
 
-	// 紧凑高容量节点列表（780px 高度下一屏直接可见 10+ 个节点）
-	ui.Scroll(c.Key("node-scroll")).Grow(1).Children(func() {
-		ui.Column(c).Gap(4).Padding(0, 2, 6, 0).Children(func() {
+	// 紧凑高容量节点列表（右侧外扩 10px 独立滚动槽道，确保卡片右对齐且细滚动条绝不重叠）
+	ui.Scroll(c.Key("node-scroll")).Grow(1).Margin(0, -10, 0, 0).Children(func() {
+		ui.Column(c).Gap(4).Padding(0, 10, 6, 0).Children(func() {
 			if len(filtered) == 0 {
-				ui.Column(c).Padding(32, 16).Center().Gap(6).Children(func() {
-					ui.Text(c, "没有匹配的节点").FontSize(13).Bold().TextColor(p.textSecondary)
-					ui.Text(c, "尝试清空搜索词或取消收藏筛选").FontSize(11.5).TextColor(p.textMuted)
+				emptyText := "无匹配节点"
+				if len(snap.Nodes) == 0 {
+					emptyText = "暂无节点"
+				}
+				ui.Column(c).Padding(32, 16).Center().Children(func() {
+					ui.Text(c, emptyText).FontSize(12.5).TextColor(p.textMuted)
 				})
 				return
 			}
@@ -537,7 +920,7 @@ func (vm *viewModel) renderNodeRow(c *ui.Context, p palette, node engine.NodeSna
 		delayColor, delayBg := delayColors(node.DelayMs, node.Testing, p)
 		delayPill := ui.Row(c.Key("delay")).MinWidth(58).Padding(3.5, 7).Radius(6.5).
 			Background(delayBg).Center().Gap(4).Cursor(ui.CursorPointer).
-			Tooltip("点击单独测速")
+			Tooltip("测速")
 		delayPill.Children(func() {
 			if node.Testing {
 				ui.Spinner(c).Size(10, 10)
@@ -564,51 +947,59 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 		vm.openAtLoginSet = true
 	}
 
-	ui.Scroll(c.Key("settings-scroll")).Grow(1).Children(func() {
-		ui.Column(c).Gap(10).Padding(0, 2, 10, 0).Children(func() {
+	ui.Scroll(c.Key("settings-scroll")).Grow(1).Margin(0, -10, 0, 0).Children(func() {
+		ui.Column(c).Gap(10).Padding(0, 10, 10, 0).Children(func() {
 
 			// 1. 本地代理设置卡片
 			renderSectionCard(c, p, "本地代理", func() {
-				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-					ui.Text(c, "混合代理端口 (HTTP/SOCKS5)").Grow(1).FontSize(12.5).TextColor(p.text)
-					inp := ui.TextInput(c.Key("port-input"), &vm.portDraft).Width(84)
+				ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
+					ui.Text(c, "代理端口").Grow(1).FontSize(12.5).TextColor(p.text)
+					inp := ui.TextInput(c.Key("port-input"), &vm.portDraft).Width(80)
 					if inp.Changed() {
 						vm.portDirty = true
 					}
-					saveBtn := ui.PrimaryButton(c.Key("save-port"), "应用").Padding(5, 12).Radius(7)
+					saveBtn := ui.PrimaryButton(c.Key("save-port"), "应用").Padding(5, 11).Radius(7)
 					if saveBtn.Clicked() || inp.Submitted() {
 						port, err := strconv.Atoi(strings.TrimSpace(vm.portDraft))
 						if err != nil || port <= 0 || port > 65535 {
-							vm.toastMsg = "端口号必须是 1-65535 的整数"
+							vm.toastMsg = "端口号需在 1-65535 之间"
 						} else {
 							vm.portDirty = false
 							allowLAN := snap.AllowLAN
 							vm.runAsync(func() error {
 								return vm.app.eng.UpdateLocalProxySettings(port, allowLAN)
-							}, fmt.Sprintf("本地代理端口已更新为 %d", port))
+							}, fmt.Sprintf("端口已改为 %d", port))
 						}
+					}
+					if renderToolbarIconBtn(c, p, "copy-proxy", "复制代理命令", "复制终端代理环境变量", svgCopy, false, p.accent, p.accentSoft, p.borderStrong, false) {
+						cmd := fmt.Sprintf("export http_proxy=http://127.0.0.1:%d https_proxy=http://127.0.0.1:%d all_proxy=socks5://127.0.0.1:%d",
+							snap.ProxyPort, snap.ProxyPort, snap.ProxyPort)
+						if vm.app != nil {
+							mygo.Clipboard.WriteText(cmd)
+						}
+						vm.toastMsg = "已复制代理命令"
 					}
 				})
 
 				ui.Divider(c)
 				allowLAN := snap.AllowLAN
-				renderSettingSwitch(c, p, "sw-lan", "允许局域网设备共享代理", "开启后监听 0.0.0.0，关闭仅监听 127.0.0.1", &allowLAN, func(v bool) {
+				renderSettingSwitch(c, p, "sw-lan", "允许局域网连接", "监听 0.0.0.0，供同网络设备使用", &allowLAN, func(v bool) {
 					port := snap.ProxyPort
 					vm.runAsync(func() error {
 						return vm.app.eng.UpdateLocalProxySettings(port, v)
-					}, toggleToast("局域网共享", v))
+					}, toggleToast("局域网连接", v))
 				})
 
 				ui.Divider(c)
 				autoSys := snap.AutoSetSysProxy
-				renderSettingSwitch(c, p, "sw-auto-sys", "启动连上后自动开启系统代理", "退出时仍会自动安全关闭系统代理", &autoSys, func(v bool) {
+				renderSettingSwitch(c, p, "sw-auto-sys", "启动时自动开启系统代理", "退出时自动关闭", &autoSys, func(v bool) {
 					vm.runAsync(func() error {
 						return vm.app.eng.SetAutoSysProxyOnStartUp(v)
-					}, toggleToast("启动自动开启系统代理", v))
+					}, toggleToast("自动系统代理", v))
 				})
 
 				if snap.ProxyAuthEnabled {
-					ui.Text(c, "已从 FlyShadow 配置继承本地代理鉴权凭据").FontSize(11).TextColor(p.textMuted)
+					ui.Text(c, "已启用本地代理鉴权").FontSize(11).TextColor(p.textMuted)
 				}
 			})
 
@@ -623,7 +1014,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 
 				ui.Divider(c)
 				dns := snap.UseBuildInDNS
-				renderSettingSwitch(c, p, "sw-dns", "使用核心内置 DNS", "", &dns, func(v bool) {
+				renderSettingSwitch(c, p, "sw-dns", "内置 DNS", "", &dns, func(v bool) {
 					vm.runAsync(func() error {
 						return vm.app.eng.UpdateNetworkSettings(snap.IPv6Enable, v, snap.DirectConnPriority)
 					}, toggleToast("内置 DNS", v))
@@ -631,7 +1022,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 
 				ui.Divider(c)
 				directPrio := snap.DirectConnPriority
-				renderSettingSwitch(c, p, "sw-dprio", "直连优先探测", "", &directPrio, func(v bool) {
+				renderSettingSwitch(c, p, "sw-dprio", "直连优先", "", &directPrio, func(v bool) {
 					vm.runAsync(func() error {
 						return vm.app.eng.UpdateNetworkSettings(snap.IPv6Enable, snap.UseBuildInDNS, v)
 					}, toggleToast("直连优先", v))
@@ -639,14 +1030,14 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 
 				ui.Divider(c)
 				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-					geoState := "未加载"
+					geoState := "未加载 GeoIP"
 					if snap.GeoIPLoaded {
-						geoState = "已加载 CN GeoIP"
+						geoState = "已加载 GeoIP"
 					}
-					ui.Text(c, fmt.Sprintf("生效规则 %d 条（自定义 %d 条）· %s", snap.RuleCount, len(snap.CustomRules), geoState)).
+					ui.Text(c, fmt.Sprintf("%d 条生效规则 · %s", snap.RuleCount, geoState)).
 						Grow(1).FontSize(11.5).TextColor(p.textMuted)
-					if ui.Button(c.Key("btn-reload-cfg"), "重载配置").Padding(5, 11).Radius(7).Clicked() {
-						vm.runAsync(func() error { return vm.app.eng.Reload() }, "已重载 ~/.FlyShadow/config.json")
+					if renderToolbarIconBtn(c, p, "btn-reload-cfg", "重载配置", "重载配置", svgRefresh, false, p.accent, p.accentSoft, p.borderStrong, false) {
+						vm.runAsync(func() error { return vm.app.eng.Reload() }, "配置已重载")
 					}
 				})
 			})
@@ -655,7 +1046,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 			renderSectionCard(c, p, "界面与偏好", func() {
 				themeIdx := themeModeToIndex(vm.currentPrefs().ThemeMode)
 				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-					ui.Text(c, "外观主题").Grow(1).FontSize(12.5).TextColor(p.text)
+					ui.Text(c, "外观").Grow(1).FontSize(12.5).TextColor(p.text)
 					if ui.Segmented(c.Key("theme-seg"), &themeIdx, "跟随系统", "浅色", "深色").Changed() {
 						mode := indexToThemeMode(themeIdx)
 						if vm.app != nil {
@@ -667,7 +1058,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				if runtime.GOOS == "darwin" {
 					ui.Divider(c)
 					showSpeed := vm.currentPrefs().ShowTraySpeed
-					renderSettingSwitch(c, p, "sw-tray-speed", "菜单栏显示实时速率", "使用等宽字体展示上下行速度", &showSpeed, func(v bool) {
+					renderSettingSwitch(c, p, "sw-tray-speed", "菜单栏显示网速", "实时显示上下行速率", &showSpeed, func(v bool) {
 						if vm.app != nil {
 							vm.app.setShowTraySpeed(v)
 						}
@@ -676,12 +1067,12 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 
 				ui.Divider(c)
 				login := vm.openAtLogin
-				renderSettingSwitch(c, p, "sw-autostart", "登录时自动启动", "随系统启动并静默驻留托盘", &login, func(v bool) {
+				renderSettingSwitch(c, p, "sw-autostart", "开机自启", "登录后静默运行", &login, func(v bool) {
 					vm.openAtLogin = v
 					if vm.app != nil {
 						if err := mygo.App.SetOpenAtLogin(v); err != nil {
 							vm.openAtLogin = mygo.App.OpenAtLogin()
-							vm.toastMsg = "设置开机自启失败: " + err.Error()
+							vm.toastMsg = "设置失败: " + err.Error()
 						} else {
 							vm.toastMsg = toggleToast("开机自启", v)
 						}
@@ -689,23 +1080,22 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				})
 			})
 
-			// 4. 订阅用量、核心环境与更新检查卡片
-			renderSectionCard(c, p, "订阅、环境与更新", func() {
+			// 4. 关于与更新卡片
+			renderSectionCard(c, p, "关于与更新", func() {
 				if snap.Traffic != nil && snap.Traffic.TrafficSize > 0 {
 					used := snap.Traffic.TrafficUpload + snap.Traffic.TrafficDownload
-					remain := max(int64(0), snap.Traffic.TrafficSize-used)
-					renderKVRow(c, p, "订阅流量（本地快照）", fmt.Sprintf("已用 %s / 总计 %s（剩余 %s · 到期 %s）",
-						FormatBytes(used), FormatBytes(snap.Traffic.TrafficSize), FormatBytes(remain), FormatExpireDate(snap.Traffic.ExpireTime)))
+					renderKVRow(c, p, "订阅流量", fmt.Sprintf("已用 %s / %s · 到期 %s",
+						FormatBytes(used), FormatBytes(snap.Traffic.TrafficSize), FormatExpireDate(int64(snap.Traffic.ExpireTime))))
 					ui.Divider(c)
 				}
 				renderKVRow(c, p, "客户端版本", version.Full())
-				renderKVRow(c, p, "核心库版本", nonEmpty(snap.CoreVersion, "未知"))
-				renderKVRow(c, p, "核心库路径", nonEmpty(snap.CoreLibPath, "未检测到"))
+				renderKVRow(c, p, "核心版本", nonEmpty(snap.CoreVersion, "未知"))
+				renderKVRow(c, p, "核心路径", nonEmpty(snap.CoreLibPath, "未检测到"))
 				renderKVRow(c, p, "配置文件", nonEmpty(snap.ConfigPath, "未知"))
 
 				ui.Divider(c)
 				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-					cliDesc := "尚未链接到 PATH（安装运行后将自动配置）"
+					cliDesc := "未链接"
 					cliColor := p.textMuted
 					if vm.cliStatusLoaded && vm.cliStatus.Installed {
 						cliDesc = nonEmpty(vm.cliStatus.Detail, vm.cliStatus.LinkPath)
@@ -716,7 +1106,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 						}
 					}
 					ui.Column(c).Grow(1).Gap(2).Children(func() {
-						ui.Text(c, "命令行工具 (fsbar)").FontSize(11).TextColor(p.textMuted)
+						ui.Text(c, "命令行 (fsbar)").FontSize(11).TextColor(p.textMuted)
 						ui.Text(c, cliDesc).FontSize(11.5).TextColor(cliColor).Wrap()
 					})
 					btnLabel := "链接到 PATH"
@@ -734,41 +1124,37 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				ui.Divider(c)
 				ui.Column(c).Gap(6).Children(func() {
 					ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-						updateText := "支持签名增量更新（GitHub Releases）"
-						if !vm.updateNativeEnabled {
-							updateText = "基于 GitHub Releases 检查更新"
-						}
+						updateText := fmt.Sprintf("当前版本 %s", version.Version)
 						updateColor := p.textMuted
 						switch {
 						case vm.updateInstalled:
-							updateText = fmt.Sprintf("新版本 %s 已安装就绪，重启后生效", vm.updateAvailable)
+							updateText = fmt.Sprintf("新版本 %s 已就绪，重启后生效", vm.updateAvailable)
 							updateColor = p.success
 						case vm.updateDownloading:
 							if vm.updateTotal > 0 {
 								pct := min(100, int(vm.updateDownloaded*100/vm.updateTotal))
-								updateText = fmt.Sprintf("正在增量下载 %s（%d%% · %s / %s）…",
-									vm.updateAvailable, pct, FormatBytes(vm.updateDownloaded), FormatBytes(vm.updateTotal))
+								updateText = fmt.Sprintf("正在下载 %s（%d%%）", vm.updateAvailable, pct)
 							} else if vm.updateDownloaded > 0 {
-								updateText = fmt.Sprintf("正在下载 %s（已下载 %s）…", vm.updateAvailable, FormatBytes(vm.updateDownloaded))
+								updateText = fmt.Sprintf("正在下载 %s（%s）", vm.updateAvailable, FormatBytes(vm.updateDownloaded))
 							} else {
-								updateText = fmt.Sprintf("正在连接更新源下载 %s…", vm.updateAvailable)
+								updateText = fmt.Sprintf("正在下载 %s…", vm.updateAvailable)
 							}
 							updateColor = p.accent
 						case vm.checkingUpdate:
-							updateText = "正在检查新版本…"
+							updateText = "检查更新中…"
 							updateColor = p.accent
 						case vm.updateErr != "":
 							updateText = vm.updateErr
 							updateColor = p.danger
 						case vm.updateNativeEnabled && vm.updateAvailable != "":
-							updateText = fmt.Sprintf("发现新版本 %s（支持签名增量更新）", vm.updateAvailable)
+							updateText = fmt.Sprintf("有新版本 %s", vm.updateAvailable)
 							updateColor = p.success
 						case vm.updateResult != nil:
 							if vm.updateResult.HasUpdate {
-								updateText = fmt.Sprintf("发现新版本 %s", vm.updateResult.LatestVersion)
+								updateText = fmt.Sprintf("有新版本 %s", vm.updateResult.LatestVersion)
 								updateColor = p.success
 							} else {
-								updateText = fmt.Sprintf("已是最新版本 (%s)", version.Version)
+								updateText = "已是最新版本"
 								updateColor = p.textSecondary
 							}
 						}
@@ -776,7 +1162,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 
 						switch {
 						case vm.updateInstalled:
-							if ui.PrimaryButton(c.Key("btn-restart-update"), "重启并应用").Padding(5, 11).Radius(7).Clicked() {
+							if ui.PrimaryButton(c.Key("btn-restart-update"), "立即重启").Padding(5, 11).Radius(7).Clicked() {
 								vm.restartForUpdate()
 							}
 						case vm.updateDownloading:
@@ -784,7 +1170,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 								vm.cancelUpdateDownload()
 							}
 						case vm.updateNativeEnabled && vm.updateAvailable != "":
-							if ui.PrimaryButton(c.Key("btn-install-update"), "增量更新").Padding(5, 11).Radius(7).Clicked() {
+							if ui.PrimaryButton(c.Key("btn-install-update"), "立即更新").Padding(5, 11).Radius(7).Clicked() {
 								vm.installNativeUpdate()
 							}
 						case vm.updateResult != nil && vm.updateResult.HasUpdate && vm.updateResult.ReleaseURL != "":
@@ -892,7 +1278,7 @@ func (vm *viewModel) installNativeUpdate() {
 				return
 			}
 			vm.applyNativeUpdateStatus(st)
-			vm.toastMsg = "更新已安装，点击「重启并应用」生效"
+			vm.toastMsg = "更新已就绪，重启后生效"
 		})
 		mygo.RunOnMain(func() { vm.app.refreshTrayMenu() })
 	}()
@@ -974,6 +1360,30 @@ func (vm *viewModel) runAsync(fn func() error, okToast string) {
 			}
 		})
 	}()
+}
+
+func renderToolbarIconBtn(c *ui.Context, p palette, key, label, tip string, svg *ui.SVG, active bool, activeFg, activeBg, activeBorder ui.Color, disabled bool) bool {
+	btn := ui.Box(c.Key(key)).Size(30, 30).Radius(8).Center().Label(label).Tooltip(tip)
+	fg := p.textSecondary
+	if active {
+		btn.Background(activeBg).Border(1, activeBorder)
+		fg = activeFg
+	} else {
+		btn.Background(p.card).Border(1, p.border)
+	}
+	if disabled {
+		btn.Opacity(0.5)
+	} else {
+		btn.Cursor(ui.CursorPointer)
+		if !active && btn.Hovered() {
+			btn.Background(p.cardHover)
+			fg = p.text
+		}
+	}
+	btn.Children(func() {
+		ui.Icon(c, svg).Size(14.5, 14.5).TextColor(fg)
+	})
+	return !disabled && btn.Clicked()
 }
 
 func renderPill(c *ui.Context, text string, fg, bg ui.Color) {

@@ -17,27 +17,27 @@ type stubCore struct {
 	nativeUDP bool
 }
 
-func (s *stubCore) LibPath() string                              { return "/stub" }
-func (s *stubCore) Version() string                              { return "2.0.2" }
-func (s *stubCore) Init() error                                  { return nil }
-func (s *stubCore) SetClientUUID(string)                         {}
-func (s *stubCore) SetProxyType(m core.ProxyMode)                { s.mode = m }
-func (s *stubCore) SetUDPProxyType(core.ProxyMode)               {}
-func (s *stubCore) SetNativeUDP(v bool)                          { s.nativeUDP = v }
-func (s *stubCore) SetIPv6Enable(bool)                           {}
-func (s *stubCore) SetUseBuildInDNS(bool)                        {}
-func (s *stubCore) SetDirectConnPriority(bool, int64)            {}
-func (s *stubCore) ClearDomainRules()                            {}
-func (s *stubCore) SetDomainRule(string, int32, int32, int32)    {}
-func (s *stubCore) SetGeoIP(string, []byte)                      {}
-func (s *stubCore) StartProxy(int, bool, string, string) error   { return nil }
-func (s *stubCore) StopProxy()                                   {}
+func (s *stubCore) LibPath() string                               { return "/stub" }
+func (s *stubCore) Version() string                               { return "2.0.2" }
+func (s *stubCore) Init() error                                   { return nil }
+func (s *stubCore) SetClientUUID(string)                          {}
+func (s *stubCore) SetProxyType(m core.ProxyMode)                 { s.mode = m }
+func (s *stubCore) SetUDPProxyType(core.ProxyMode)                {}
+func (s *stubCore) SetNativeUDP(v bool)                           { s.nativeUDP = v }
+func (s *stubCore) SetIPv6Enable(bool)                            {}
+func (s *stubCore) SetUseBuildInDNS(bool)                         {}
+func (s *stubCore) SetDirectConnPriority(bool, int64)             {}
+func (s *stubCore) ClearDomainRules()                             {}
+func (s *stubCore) SetDomainRule(string, int32, int32, int32)     {}
+func (s *stubCore) SetGeoIP(string, []byte)                       {}
+func (s *stubCore) StartProxy(int, bool, string, string) error    { return nil }
+func (s *stubCore) StopProxy()                                    {}
 func (s *stubCore) ConnectTunnel(string, int, string, bool) error { s.connected = true; return nil }
-func (s *stubCore) CloseTunnel() int32                           { s.connected = false; return 0 }
-func (s *stubCore) TestTunnelDelay(config.Node, bool) int64      { return 55 }
-func (s *stubCore) TunnelUploadBytes() int64                     { return 1024 }
-func (s *stubCore) TunnelDownloadBytes() int64                   { return 4096 }
-func (s *stubCore) TunnelPingDelay() int32                       { return 33 }
+func (s *stubCore) CloseTunnel() int32                            { s.connected = false; return 0 }
+func (s *stubCore) TestTunnelDelay(config.Node, bool) int64       { return 55 }
+func (s *stubCore) TunnelUploadBytes() int64                      { return 1024 }
+func (s *stubCore) TunnelDownloadBytes() int64                    { return 4096 }
+func (s *stubCore) TunnelPingDelay() int32                        { return 33 }
 func (s *stubCore) TunnelStatus() int32 {
 	if s.connected {
 		return 0
@@ -56,8 +56,8 @@ type stubSysProxy struct {
 	on bool
 }
 
-func (s *stubSysProxy) Enable(string, int) error         { s.on = true; return nil }
-func (s *stubSysProxy) Disable() error                   { s.on = false; return nil }
+func (s *stubSysProxy) Enable(string, int) error            { s.on = true; return nil }
+func (s *stubSysProxy) Disable() error                      { s.on = false; return nil }
 func (s *stubSysProxy) IsEnabled(string, int) (bool, error) { return s.on, nil }
 
 func TestControlServerAndClient(t *testing.T) {

@@ -80,21 +80,21 @@ func ResolveTransportDecision(udpAccelerationEnabled, nativeUDPEnabled bool, nod
 
 // ConnectionInfo 对应核心库 get_tunnel_mapper_info_json 返回的单条连接监控记录。
 type ConnectionInfo struct {
-	Protocol            string `json:"protocol"`
-	SourceAddr          string `json:"source_addr"`
-	SourcePort          int    `json:"source_port"`
-	TargetAddr          string `json:"target_addr"`
-	TargetPort          int    `json:"target_port"`
-	MatcherName         string `json:"matcher_name"`
-	MatcherRule         string `json:"matcher_rule"`
-	ProcessName         string `json:"process_name"`
-	ProxyType           string `json:"proxy_type"`
-	ActiveTime          int64  `json:"active_time"`
-	UploadTraffic       int64  `json:"upload_traffic"`
-	DownloadTraffic     int64  `json:"download_traffic"`
-	UploadTrafficTotal  int64  `json:"upload_traffic_total"`
-	DownloadTrafficTotal int64 `json:"download_traffic_total"`
-	Status              string `json:"status"`
+	Protocol             string `json:"protocol"`
+	SourceAddr           string `json:"source_addr"`
+	SourcePort           int    `json:"source_port"`
+	TargetAddr           string `json:"target_addr"`
+	TargetPort           int    `json:"target_port"`
+	MatcherName          string `json:"matcher_name"`
+	MatcherRule          string `json:"matcher_rule"`
+	ProcessName          string `json:"process_name"`
+	ProxyType            string `json:"proxy_type"`
+	ActiveTime           int64  `json:"active_time"`
+	UploadTraffic        int64  `json:"upload_traffic"`
+	DownloadTraffic      int64  `json:"download_traffic"`
+	UploadTrafficTotal   int64  `json:"upload_traffic_total"`
+	DownloadTrafficTotal int64  `json:"download_traffic_total"`
+	Status               string `json:"status"`
 }
 
 // CloseKey 生成传给核心库 close_connect 的精确连接键（与官方客户端完全一致）。

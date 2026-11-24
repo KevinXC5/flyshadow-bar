@@ -175,11 +175,20 @@ func (tc *trayController) patchMenuInPlace(snap engine.Snapshot) {
 	}
 	if item := tc.menu.ItemByID("action-ping"); item != nil {
 		if snap.Pinging {
-			item.SetLabel(fmt.Sprintf("正在测速 (%d/%d)…", snap.PingCompleted, snap.PingTotal))
+			item.SetLabel(fmt.Sprintf("测速中 (%d/%d)…", snap.PingCompleted, snap.PingTotal))
 			item.SetEnabled(false)
 		} else {
-			item.SetLabel("节点一键测速")
+			item.SetLabel("节点测速")
 			item.SetEnabled(true)
+		}
+	}
+	if item := tc.menu.ItemByID("action-sync"); item != nil {
+		if snap.Syncing {
+			item.SetLabel("正在同步订阅…")
+			item.SetEnabled(false)
+		} else {
+			item.SetLabel("同步订阅与规则")
+			item.SetEnabled(snap.HasCloudAuth)
 		}
 	}
 	if item := tc.menu.ItemByID("nodes-submenu"); item != nil {
@@ -269,14 +278,14 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 	}
 	if len(nodeItems) == 0 {
 		nodeItems = append(nodeItems, &mygo.MenuItem{
-			Label:    "暂无可用节点",
+			Label:    "暂无节点",
 			Disabled: true,
 		})
 	}
 
-	pingLabel := "节点一键测速"
+	pingLabel := "节点测速"
 	if snap.Pinging {
-		pingLabel = fmt.Sprintf("正在测速 (%d/%d)…", snap.PingCompleted, snap.PingTotal)
+		pingLabel = fmt.Sprintf("测速中 (%d/%d)…", snap.PingCompleted, snap.PingTotal)
 	}
 
 	items := []*mygo.MenuItem{
@@ -296,7 +305,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 		mygo.Separator(),
 		{
 			ID:       "mode-rule",
-			Label:    "规则模式 (Rule)",
+			Label:    "规则模式",
 			Type:     mygo.MenuItemRadio,
 			Checked:  snap.ModeCode == core.ProxyModeRule,
 			KeepOpen: true,
@@ -306,7 +315,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 		},
 		{
 			ID:       "mode-global",
-			Label:    "全局模式 (Global)",
+			Label:    "全局模式",
 			Type:     mygo.MenuItemRadio,
 			Checked:  snap.ModeCode == core.ProxyModeGlobal,
 			KeepOpen: true,
@@ -316,7 +325,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 		},
 		{
 			ID:       "mode-direct",
-			Label:    "直连模式 (Direct)",
+			Label:    "直连模式",
 			Type:     mygo.MenuItemRadio,
 			Checked:  snap.ModeCode == core.ProxyModeDirect,
 			KeepOpen: true,
@@ -355,7 +364,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 		},
 		{
 			ID:       "toggle-native-udp",
-			Label:    "原生 UDP (Native UDP)",
+			Label:    "原生 UDP",
 			Type:     mygo.MenuItemCheckbox,
 			Checked:  snap.NativeUDP,
 			KeepOpen: true,
@@ -374,6 +383,14 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 			},
 		},
 		{
+			ID:       "action-sync",
+			Label:    "同步订阅与规则",
+			Disabled: snap.Syncing || !snap.HasCloudAuth,
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				go func() { _, _ = tc.app.eng.SyncSubscription(context.Background()) }()
+			},
+		},
+		{
 			ID:    "action-reload",
 			Label: "重载配置",
 			Click: func(*mygo.MenuItem, *mygo.Window) {
@@ -387,7 +404,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 		if st.Installed {
 			items = append(items, &mygo.MenuItem{
 				ID:    "action-update-restart",
-				Label: fmt.Sprintf("更新 %s 已就绪 · 立即重启", st.Available),
+				Label: fmt.Sprintf("重启更新至 %s", st.Available),
 				Click: func(*mygo.MenuItem, *mygo.Window) {
 					_ = tc.app.updates.Restart()
 				},
@@ -395,7 +412,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 		} else if st.Available != "" {
 			items = append(items, &mygo.MenuItem{
 				ID:    "action-update-open",
-				Label: fmt.Sprintf("发现新版本 %s（增量更新）", st.Available),
+				Label: fmt.Sprintf("有新版本 %s", st.Available),
 				Click: func(*mygo.MenuItem, *mygo.Window) {
 					tc.app.openSettingsTab()
 				},

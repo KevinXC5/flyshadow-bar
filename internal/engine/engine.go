@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/cloud"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
 	"github.com/KevinXC5/flyshadow-bar/internal/sysproxy"
@@ -41,45 +43,57 @@ type NodeSnapshot struct {
 	Testing     bool     `json:"testing"`
 }
 
+// SpeedSample 记录单次 1 秒周期的上下行速率采样（字节/秒），用于主面板实时折线图。
+type SpeedSample struct {
+	UploadBps   int64 `json:"uploadBps"`
+	DownloadBps int64 `json:"downloadBps"`
+}
+
+const maxSpeedHistoryPoints = 48
+
 // Snapshot 是整个客户端运行状态的只读快照，用于 UI、托盘与本地控制 API。
 type Snapshot struct {
-	AppVersion             string                 `json:"appVersion"`
-	CoreVersion            string                 `json:"coreVersion"`
-	CoreLibPath            string                 `json:"coreLibPath"`
-	ConfigPath             string                 `json:"configPath"`
-	GeoIPLoaded            bool                   `json:"geoipLoaded"`
-	GeoIPPath              string                 `json:"geoipPath,omitempty"`
-	RuleCount              int                    `json:"ruleCount"`
-	State                  TunnelState            `json:"state"`
-	LastError              string                 `json:"lastError,omitempty"`
-	CurrentNode            *NodeSnapshot          `json:"currentNode,omitempty"`
-	Mode                   string                 `json:"mode"`
-	ModeCode               core.ProxyMode         `json:"modeCode"`
-	ProxyPort              int                    `json:"proxyPort"`
-	AllowLAN               bool                   `json:"allowLan"`
-	ProxyAuthEnabled       bool                   `json:"proxyAuthEnabled"`
-	SystemProxy            bool                   `json:"systemProxy"`
-	UDPAccelerationEnabled bool                   `json:"udpAccelerationEnabled"`
-	NativeUDP              bool                   `json:"nativeUdp"`
-	EffectiveTransport     core.TransportDecision `json:"effectiveTransport"`
+	AppVersion             string                  `json:"appVersion"`
+	CoreVersion            string                  `json:"coreVersion"`
+	CoreLibPath            string                  `json:"coreLibPath"`
+	ConfigPath             string                  `json:"configPath"`
+	GeoIPLoaded            bool                    `json:"geoipLoaded"`
+	GeoIPPath              string                  `json:"geoipPath,omitempty"`
+	RuleCount              int                     `json:"ruleCount"`
+	State                  TunnelState             `json:"state"`
+	LastError              string                  `json:"lastError,omitempty"`
+	CurrentNode            *NodeSnapshot           `json:"currentNode,omitempty"`
+	Mode                   string                  `json:"mode"`
+	ModeCode               core.ProxyMode          `json:"modeCode"`
+	ProxyPort              int                     `json:"proxyPort"`
+	AllowLAN               bool                    `json:"allowLan"`
+	ProxyAuthEnabled       bool                    `json:"proxyAuthEnabled"`
+	SystemProxy            bool                    `json:"systemProxy"`
+	UDPAccelerationEnabled bool                    `json:"udpAccelerationEnabled"`
+	NativeUDP              bool                    `json:"nativeUdp"`
+	EffectiveTransport     core.TransportDecision  `json:"effectiveTransport"`
 	IPv6Enable             bool                    `json:"ipv6Enable"`
 	UseBuildInDNS          bool                    `json:"useBuildInDns"`
 	DirectConnPriority     bool                    `json:"directConnPriority"`
 	AutoSetSysProxy        bool                    `json:"autoSetSysProxy"`
+	HasCloudAuth           bool                    `json:"hasCloudAuth"`
+	Syncing                bool                    `json:"syncing"`
+	LastUpdateTime         int64                   `json:"lastUpdateTime,omitempty"`
 	Traffic                *config.UserTrafficInfo `json:"traffic,omitempty"`
 	CustomRules            []config.DomainRule     `json:"customRules"`
 	RuleLabels             []string                `json:"ruleLabels"`
 	ActiveRuleLabels       []string                `json:"activeRuleLabels"`
 	UploadBytes            int64                   `json:"uploadBytes"`
-	DownloadBytes          int64                  `json:"downloadBytes"`
-	UploadSpeedBps         int64                  `json:"uploadSpeedBps"`
-	DownloadSpeedBps       int64                  `json:"downloadSpeedBps"`
-	TunnelPingMs           int32                  `json:"tunnelPingMs"`
-	Pinging                bool                   `json:"pinging"`
-	PingCompleted          int                    `json:"pingCompleted"`
-	PingTotal              int                    `json:"pingTotal"`
-	Nodes                  []NodeSnapshot         `json:"nodes"`
-	UpdatedAt              int64                  `json:"updatedAt"`
+	DownloadBytes          int64                   `json:"downloadBytes"`
+	UploadSpeedBps         int64                   `json:"uploadSpeedBps"`
+	DownloadSpeedBps       int64                   `json:"downloadSpeedBps"`
+	SpeedHistory           []SpeedSample           `json:"speedHistory,omitempty"`
+	TunnelPingMs           int32                   `json:"tunnelPingMs"`
+	Pinging                bool                    `json:"pinging"`
+	PingCompleted          int                     `json:"pingCompleted"`
+	PingTotal              int                     `json:"pingTotal"`
+	Nodes                  []NodeSnapshot          `json:"nodes"`
+	UpdatedAt              int64                   `json:"updatedAt"`
 }
 
 // Options 允许在启动或测试时注入依赖。
@@ -88,6 +102,7 @@ type Options struct {
 	CoreLibPath         string
 	CoreClient          core.Client
 	SysProxy            sysproxy.Manager
+	CloudClient         cloud.SyncAPI
 	AutoConnect         bool
 	DisableAutoSysProxy bool
 }
@@ -98,6 +113,7 @@ type Engine struct {
 	opMu                sync.Mutex // 串行化状态变更操作（切节点、启停、重载）
 	core                core.Client
 	sysProxy            sysproxy.Manager
+	cloud               cloud.SyncAPI
 	cfg                 *config.Config
 	disableAutoSysProxy bool
 
@@ -109,6 +125,7 @@ type Engine struct {
 	lastError     string
 	systemProxyOn bool
 	proxyStarted  bool
+	syncing       bool
 
 	delays        map[int]int64
 	testingNodes  map[int]bool
@@ -121,10 +138,14 @@ type Engine struct {
 	lastSampleTime    time.Time
 	uploadSpeedBps    int64
 	downloadSpeedBps  int64
+	speedHistory      []SpeedSample
 	tunnelPingMs      int32
 
-	listeners map[int]func(Snapshot)
-	nextSubID int
+	listeners     map[int]func(Snapshot)
+	nextSubID     int
+	connProcCache map[string]string
+	procLookupFn  func(proxyPort int) map[string]string
+	selfProcNames []string
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -152,16 +173,25 @@ func New(opts Options) (*Engine, error) {
 	if sp == nil {
 		sp = sysproxy.New()
 	}
+	cc := opts.CloudClient
+	if cc == nil {
+		cc = cloud.NewClient()
+	}
 
 	e := &Engine{
 		core:                cli,
 		sysProxy:            sp,
+		cloud:               cc,
 		cfg:                 cfg,
 		disableAutoSysProxy: opts.DisableAutoSysProxy,
 		state:               StateDisconnected,
 		delays:              make(map[int]int64),
 		testingNodes:        make(map[int]bool),
+		speedHistory:        make([]SpeedSample, maxSpeedHistoryPoints),
 		listeners:           make(map[int]func(Snapshot)),
+		connProcCache:       make(map[string]string),
+		procLookupFn:        lookupLoopbackClients,
+		selfProcNames:       currentSelfProcessNames(),
 		stopCh:              make(chan struct{}),
 		tunnelPingMs:        -1,
 	}
@@ -217,6 +247,18 @@ func (e *Engine) Start(autoConnect bool) error {
 				e.mu.Unlock()
 				e.emit()
 			}
+		}
+		// 首次建连后若配置包含订阅凭据且距上次同步超过 5 分钟，后台静默刷新流量、到期时间、节点与云端规则
+		e.mu.RLock()
+		shouldSync := !e.disableAutoSysProxy && e.cfg.SubscribePassword != "" &&
+			(e.cfg.LastUpdateTime == 0 || time.Since(time.UnixMilli(int64(e.cfg.LastUpdateTime))) > 5*time.Minute)
+		e.mu.RUnlock()
+		if shouldSync {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+				defer cancel()
+				_, _ = e.SyncSubscription(ctx)
+			}()
 		}
 	}
 	return nil
@@ -341,6 +383,8 @@ func (e *Engine) Snapshot() Snapshot {
 		cp := *cfg.SubscribeInfo.User
 		traffic = &cp
 	}
+	speedHist := make([]SpeedSample, len(e.speedHistory))
+	copy(speedHist, e.speedHistory)
 
 	mode := core.ProxyMode(cfg.ProxyType)
 	return Snapshot{
@@ -367,6 +411,9 @@ func (e *Engine) Snapshot() Snapshot {
 		UseBuildInDNS:          cfg.UseBuildInDNS,
 		DirectConnPriority:     cfg.DirectConnPriority,
 		AutoSetSysProxy:        cfg.AutoSetSysProxyOnStartUp,
+		HasCloudAuth:           cfg.SubscribePassword != "",
+		Syncing:                e.syncing,
+		LastUpdateTime:         int64(cfg.LastUpdateTime),
 		Traffic:                traffic,
 		CustomRules:            customRules,
 		RuleLabels:             ruleLabels,
@@ -375,6 +422,7 @@ func (e *Engine) Snapshot() Snapshot {
 		DownloadBytes:          e.lastDownloadBytes,
 		UploadSpeedBps:         e.uploadSpeedBps,
 		DownloadSpeedBps:       e.downloadSpeedBps,
+		SpeedHistory:           speedHist,
 		TunnelPingMs:           e.tunnelPingMs,
 		Pinging:                e.pinging,
 		PingCompleted:          e.pingCompleted,
@@ -643,10 +691,209 @@ func (e *Engine) SetAutoSysProxyOnStartUp(enabled bool) error {
 	return nil
 }
 
-// AddCustomRule 新增自定义规则、无损保存并立即热重载核心规则（不断开当前隧道）。
+// localProxyURLForCloud 在隧道已连上且本地代理已启动时返回本地代理地址，供云端同步优先经隧道访问。
+func (e *Engine) localProxyURLForCloud() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if !e.proxyStarted || e.state != StateConnected || e.cfg.ProxyPort <= 0 {
+		return ""
+	}
+	if e.cfg.ProxyUsername != "" && e.cfg.ProxyPassword != "" {
+		return fmt.Sprintf("http://%s:%s@127.0.0.1:%d", e.cfg.ProxyUsername, e.cfg.ProxyPassword, e.cfg.ProxyPort)
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", e.cfg.ProxyPort)
+}
+
+// SyncSubscription 从官方云端同步最新订阅节点、流量用量、到期时间、VIP 等级与自定义分流规则，
+// 无损保存至 config.json 并立即热重载核心规则（不断开当前隧道）。
+func (e *Engine) SyncSubscription(ctx context.Context) (Snapshot, error) {
+	if e.cloud == nil {
+		return Snapshot{}, errors.New("未启用云端同步客户端")
+	}
+
+	e.mu.Lock()
+	if e.syncing {
+		e.mu.Unlock()
+		return Snapshot{}, errors.New("正在同步中，请稍候")
+	}
+	pw := e.cfg.SubscribePassword
+	if pw == "" {
+		e.mu.Unlock()
+		return Snapshot{}, errors.New("尚未配置订阅密码，请先在订阅卡片中配置")
+	}
+	e.syncing = true
+	e.mu.Unlock()
+	e.emit()
+
+	defer func() {
+		e.mu.Lock()
+		e.syncing = false
+		e.mu.Unlock()
+		e.emit()
+	}()
+
+	proxyURL := e.localProxyURLForCloud()
+	sub, err := e.cloud.FetchSubscribe(ctx, pw, proxyURL)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	// 同步拉取云端自定义规则（与原版 SubscribeService.fetchAndSaveSubscribe 一致；若云端规则拉取失败不阻断订阅节点与流量更新）
+	customRules, _ := e.cloud.FetchCustomRules(ctx, pw, proxyURL)
+
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+
+	e.mu.Lock()
+	e.cfg.ApplySyncedData(*sub, customRules, time.Now())
+	saveErr := e.cfg.Save()
+	e.mu.Unlock()
+	if saveErr != nil {
+		return Snapshot{}, fmt.Errorf("保存同步结果失败: %w", saveErr)
+	}
+
+	e.reloadRulesLocked()
+	e.emit()
+	return e.Snapshot(), nil
+}
+
+// SetSubscribePassword 使用新订阅密码先向云端校验并拉取最新节点、流量与自定义规则，
+// 仅当云端校验成功后才原子写回 config.json 并热重载规则，失败时不覆盖现有凭据与配置。
+func (e *Engine) SetSubscribePassword(ctx context.Context, password string) (Snapshot, error) {
+	if e.cloud == nil {
+		return Snapshot{}, errors.New("未启用云端同步客户端")
+	}
+	pw := strings.TrimSpace(password)
+	if pw == "" {
+		return Snapshot{}, errors.New("订阅密码不能为空")
+	}
+
+	e.mu.Lock()
+	if e.syncing {
+		e.mu.Unlock()
+		return Snapshot{}, errors.New("正在同步中，请稍候")
+	}
+	e.syncing = true
+	e.mu.Unlock()
+	e.emit()
+
+	defer func() {
+		e.mu.Lock()
+		e.syncing = false
+		e.mu.Unlock()
+		e.emit()
+	}()
+
+	proxyURL := e.localProxyURLForCloud()
+	sub, err := e.cloud.FetchSubscribe(ctx, pw, proxyURL)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	customRules, _ := e.cloud.FetchCustomRules(ctx, pw, proxyURL)
+
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+
+	e.mu.Lock()
+	e.cfg.SetSubscribePassword(pw)
+	e.cfg.ApplySyncedData(*sub, customRules, time.Now())
+	saveErr := e.cfg.Save()
+	e.mu.Unlock()
+	if saveErr != nil {
+		return Snapshot{}, fmt.Errorf("保存订阅配置失败: %w", saveErr)
+	}
+
+	e.reloadRulesLocked()
+	e.emit()
+	return e.Snapshot(), nil
+}
+
+// SyncCustomRules 单独从云端拉取最新自定义规则列表并热重载。
+func (e *Engine) SyncCustomRules(ctx context.Context) ([]config.DomainRule, error) {
+	if e.cloud == nil {
+		return nil, errors.New("未启用云端同步客户端")
+	}
+
+	e.mu.Lock()
+	if e.syncing {
+		e.mu.Unlock()
+		return nil, errors.New("正在同步中，请稍候")
+	}
+	pw := e.cfg.SubscribePassword
+	if pw == "" {
+		e.mu.Unlock()
+		return nil, errors.New("当前配置缺少订阅凭据")
+	}
+	e.syncing = true
+	e.mu.Unlock()
+	e.emit()
+
+	defer func() {
+		e.mu.Lock()
+		e.syncing = false
+		e.mu.Unlock()
+		e.emit()
+	}()
+
+	rules, err := e.cloud.FetchCustomRules(ctx, pw, e.localProxyURLForCloud())
+	if err != nil {
+		return nil, err
+	}
+
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+
+	e.mu.Lock()
+	e.cfg.ReplaceCustomRules(rules, "")
+	saveErr := e.cfg.Save()
+	e.mu.Unlock()
+	if saveErr != nil {
+		return nil, fmt.Errorf("保存云端规则失败: %w", saveErr)
+	}
+
+	e.reloadRulesLocked()
+	e.emit()
+	return rules, nil
+}
+
+// AddCustomRule 新增自定义规则：存在订阅凭据时同步写入云端并拉取云端 ID，
+// 再无损保存本地并立即热重载核心规则（不断开当前隧道）。
 func (e *Engine) AddCustomRule(rule config.DomainRule) (config.DomainRule, error) {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
+
+	e.mu.RLock()
+	pw := e.cfg.SubscribePassword
+	e.mu.RUnlock()
+
+	if pw != "" && e.cloud != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		proxyURL := e.localProxyURLForCloud()
+		if err := e.cloud.SaveCustomRule(ctx, pw, rule, proxyURL); err != nil {
+			return config.DomainRule{}, err
+		}
+		// 与原版一致：保存后刷新云端列表以获取服务端分配的权威 ID
+		if remoteList, err := e.cloud.FetchCustomRules(ctx, pw, proxyURL); err == nil {
+			e.mu.Lock()
+			e.cfg.ReplaceCustomRules(remoteList, rule.Label)
+			saveErr := e.cfg.Save()
+			e.mu.Unlock()
+			if saveErr != nil {
+				return config.DomainRule{}, fmt.Errorf("保存自定义规则失败: %w", saveErr)
+			}
+			e.reloadRulesLocked()
+			e.emit()
+			for _, r := range remoteList {
+				if r.Domain == rule.Domain && r.Matching == rule.Matching && r.ProxyType == rule.ProxyType {
+					return r, nil
+				}
+			}
+			if len(remoteList) > 0 {
+				return remoteList[0], nil
+			}
+			return rule, nil
+		}
+	}
 
 	e.mu.Lock()
 	added, err := e.cfg.AddCustomRule(rule)
@@ -665,10 +912,35 @@ func (e *Engine) AddCustomRule(rule config.DomainRule) (config.DomainRule, error
 	return added, nil
 }
 
-// UpdateCustomRule 更新已有自定义规则并立即热生效。
+// UpdateCustomRule 更新已有自定义规则：存在订阅凭据时同步至云端并立即热生效。
 func (e *Engine) UpdateCustomRule(rule config.DomainRule) (config.DomainRule, error) {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
+
+	e.mu.RLock()
+	pw := e.cfg.SubscribePassword
+	existing, exists := e.cfg.FindCustomRule(rule.ID)
+	e.mu.RUnlock()
+	if !exists {
+		return config.DomainRule{}, fmt.Errorf("未找到 ID 为 %d 的自定义规则", rule.ID)
+	}
+	if rule.Enable == nil {
+		rule.Enable = existing.Enable
+		if rule.Enable == nil {
+			rule.Enable = config.IntPtr(1)
+		}
+	}
+	if rule.CreateTime == 0 {
+		rule.CreateTime = existing.CreateTime
+	}
+
+	if pw != "" && e.cloud != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := e.cloud.UpdateCustomRule(ctx, pw, rule, e.localProxyURLForCloud()); err != nil {
+			return config.DomainRule{}, err
+		}
+	}
 
 	e.mu.Lock()
 	updated, err := e.cfg.UpdateCustomRule(rule)
@@ -687,10 +959,26 @@ func (e *Engine) UpdateCustomRule(rule config.DomainRule) (config.DomainRule, er
 	return updated, nil
 }
 
-// DeleteCustomRule 删除指定 ID 的自定义规则并立即热生效。
+// DeleteCustomRule 删除指定 ID 的自定义规则：存在订阅凭据时同步从云端删除并立即热生效。
 func (e *Engine) DeleteCustomRule(id int) error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
+
+	e.mu.RLock()
+	pw := e.cfg.SubscribePassword
+	_, exists := e.cfg.FindCustomRule(id)
+	e.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("未找到 ID 为 %d 的自定义规则", id)
+	}
+
+	if pw != "" && e.cloud != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := e.cloud.RemoveCustomRule(ctx, pw, id, e.localProxyURLForCloud()); err != nil {
+			return err
+		}
+	}
 
 	e.mu.Lock()
 	if err := e.cfg.DeleteCustomRule(id); err != nil {
@@ -708,10 +996,33 @@ func (e *Engine) DeleteCustomRule(id int) error {
 	return nil
 }
 
-// ToggleCustomRule 切换指定 ID 的自定义规则启用状态并立即热生效。
+// ToggleCustomRule 切换指定 ID 的自定义规则启用状态：存在订阅凭据时同步至云端并立即热生效。
 func (e *Engine) ToggleCustomRule(id int) (bool, error) {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
+
+	e.mu.RLock()
+	pw := e.cfg.SubscribePassword
+	cur, exists := e.cfg.FindCustomRule(id)
+	e.mu.RUnlock()
+	if !exists {
+		return false, fmt.Errorf("未找到 ID 为 %d 的自定义规则", id)
+	}
+
+	next := !cur.IsEnabled()
+	v := 0
+	if next {
+		v = 1
+	}
+	cur.Enable = &v
+
+	if pw != "" && e.cloud != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := e.cloud.UpdateCustomRule(ctx, pw, cur, e.localProxyURLForCloud()); err != nil {
+			return false, err
+		}
+	}
 
 	e.mu.Lock()
 	enabled, err := e.cfg.ToggleCustomRule(id)
@@ -754,6 +1065,7 @@ func (e *Engine) Connections() ([]core.ConnectionInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.enrichConnectionProcesses(list)
 	sort.SliceStable(list, func(i, j int) bool {
 		if list[i].ActiveTime != list[j].ActiveTime {
 			return list[i].ActiveTime > list[j].ActiveTime
@@ -763,6 +1075,56 @@ func (e *Engine) Connections() ([]core.ConnectionInfo, error) {
 		return ti > tj
 	})
 	return list, nil
+}
+
+// enrichConnectionProcesses 修正 macOS 下核心库按端口反查进程时误将代理服务端自身当作来源进程的问题。
+func (e *Engine) enrichConnectionProcesses(list []core.ConnectionInfo) {
+	if len(list) == 0 {
+		e.mu.Lock()
+		clear(e.connProcCache)
+		e.mu.Unlock()
+		return
+	}
+
+	e.mu.RLock()
+	proxyPort := e.cfg.ProxyPort
+	lookupFn := e.procLookupFn
+	selfNames := e.selfProcNames
+	e.mu.RUnlock()
+
+	var resolved map[string]string
+	if lookupFn != nil && proxyPort > 0 {
+		resolved = lookupFn(proxyPort)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	nextCache := make(map[string]string, len(list))
+	for i := range list {
+		c := &list[i]
+		closeKey := c.CloseKey()
+		srcKey := formatConnSourceKey(c.SourceAddr, c.SourcePort)
+
+		if proc, ok := resolved[srcKey]; ok && proc != "" {
+			c.ProcessName = proc
+			nextCache[closeKey] = proc
+			continue
+		}
+		if cached, ok := e.connProcCache[closeKey]; ok && cached != "" {
+			c.ProcessName = cached
+			nextCache[closeKey] = cached
+			continue
+		}
+		if isSelfProcessName(c.ProcessName, selfNames) {
+			c.ProcessName = ""
+			continue
+		}
+		if c.ProcessName != "" {
+			nextCache[closeKey] = c.ProcessName
+		}
+	}
+	e.connProcCache = nextCache
 }
 
 // CloseConnection 强制关闭核心库中的指定连接（使新规则立即生效）。
@@ -978,13 +1340,22 @@ func (e *Engine) startLocalProxyLocked() error {
 	pass := e.cfg.ProxyPassword
 	e.mu.RUnlock()
 
-	if err := e.core.StartProxy(port, allowLAN, user, pass); err != nil {
-		return err
+	// 重启更新时旧进程可能仍在短暂释放监听套接字，最多重试 10 次（约 1.5s），绝不擅自改动端口
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		if err = e.core.StartProxy(port, allowLAN, user, pass); err == nil {
+			e.mu.Lock()
+			e.proxyStarted = true
+			e.mu.Unlock()
+			return nil
+		}
+		select {
+		case <-e.stopCh:
+			return err
+		case <-time.After(150 * time.Millisecond):
+		}
 	}
-	e.mu.Lock()
-	e.proxyStarted = true
-	e.mu.Unlock()
-	return nil
+	return err
 }
 
 func (e *Engine) connectCurrentLocked() error {
@@ -1111,7 +1482,23 @@ func (e *Engine) sampleStats(now time.Time) {
 	e.lastDownloadBytes = down
 	e.lastSampleTime = now
 	e.tunnelPingMs = ping
+	e.appendSpeedSampleLocked(e.uploadSpeedBps, e.downloadSpeedBps)
 	e.mu.Unlock()
 
 	e.emit()
+}
+
+func (e *Engine) appendSpeedSampleLocked(upBps, downBps int64) {
+	if len(e.speedHistory) >= maxSpeedHistoryPoints {
+		copy(e.speedHistory, e.speedHistory[1:])
+		e.speedHistory[len(e.speedHistory)-1] = SpeedSample{
+			UploadBps:   upBps,
+			DownloadBps: downBps,
+		}
+		return
+	}
+	e.speedHistory = append(e.speedHistory, SpeedSample{
+		UploadBps:   upBps,
+		DownloadBps: downBps,
+	})
 }

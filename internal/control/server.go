@@ -109,6 +109,7 @@ func StartServer(eng *engine.Engine, opts ServerOptions) (*Server, error) {
 	mux.HandleFunc("/api/v1/sysproxy", s.auth(s.handleSysProxy))
 	mux.HandleFunc("/api/v1/ping", s.auth(s.handlePing))
 	mux.HandleFunc("/api/v1/reload", s.auth(s.handleReload))
+	mux.HandleFunc("/api/v1/sync", s.auth(s.handleSync))
 	mux.HandleFunc("/api/v1/connect", s.auth(s.handleConnect))
 	mux.HandleFunc("/api/v1/disconnect", s.auth(s.handleDisconnect))
 	mux.HandleFunc("/api/v1/rules", s.auth(s.handleRules))
@@ -388,6 +389,19 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.eng.Snapshot())
+}
+
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "仅支持 POST"})
+		return
+	}
+	snap, err := s.eng.SyncSubscription(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 type ruleIDRequest struct {

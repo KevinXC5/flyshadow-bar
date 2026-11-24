@@ -25,34 +25,34 @@ type NativeClient struct {
 	tc    int64
 	proxy int64
 
-	fnNewRuntime             func() int64
-	fnNewTunnelContext       func(rt int64) int64
-	fnSetClientUUID          func(rt, tc int64, uuid string)
-	fnSetProxyType           func(rt, tc int64, proxyType int32)
-	fnSetUDPProxyType        func(rt, tc int64, proxyType int32)
-	fnSetNativeUDP           func(rt, tc int64, enable bool)
-	fnSetIPv6Enable          func(rt, tc int64, enable bool)
-	fnSetUseBuildInDNS       func(rt, tc int64, enable bool)
-	fnSetDirectConnPriority  func(rt, tc int64, enable bool, timeoutMs int64)
-	fnClearDomainRule        func(rt, tc int64)
-	fnSetDomainRuleObj       func(rt, tc int64, domain string, matching, proxyType, directConnPriority int32)
-	fnSetGeoIP               func(rt, tc int64, country string, data uintptr, length int32)
-	fnNewProxy               func(tc int64) int64
-	fnStartProxy             func(rt, proxy int64, port int32, user, pass string) *byte
-	fnStartProxyIP           func(rt, proxy int64, ip string, port int32, user, pass string) *byte
-	fnStopProxy              func(rt, proxy int64)
-	fnFreeProxy              func(proxy int64)
-	fnConnectTunnel          func(rt, tc int64, host string, port int32, password string, enableQuic bool)
-	fnCloseTunnel            func(rt, tc int64) int32
-	fnTestTunnelDelay        func(rt int64, nodeJSON string, enableQuic bool) int64
-	fnGetTunnelUpload        func(rt, tc int64) int64
-	fnGetTunnelDownload      func(rt, tc int64) int64
-	fnGetTunnelPingDelay     func(rt, tc int64) int32
-	fnGetTunnelStatus        func(rt, tc int64) int32
-	fnGetTunnelMapperInfo    func(rt, tc int64) *byte
-	fnCloseConnect           func(rt, tc int64, key string)
-	fnGetVersion             func() *byte
-	fnFreeString             func(ptr *byte)
+	fnNewRuntime            func() int64
+	fnNewTunnelContext      func(rt int64) int64
+	fnSetClientUUID         func(rt, tc int64, uuid string)
+	fnSetProxyType          func(rt, tc int64, proxyType int32)
+	fnSetUDPProxyType       func(rt, tc int64, proxyType int32)
+	fnSetNativeUDP          func(rt, tc int64, enable bool)
+	fnSetIPv6Enable         func(rt, tc int64, enable bool)
+	fnSetUseBuildInDNS      func(rt, tc int64, enable bool)
+	fnSetDirectConnPriority func(rt, tc int64, enable bool, timeoutMs int64)
+	fnClearDomainRule       func(rt, tc int64)
+	fnSetDomainRuleObj      func(rt, tc int64, domain string, matching, proxyType, directConnPriority int32)
+	fnSetGeoIP              func(rt, tc int64, country string, data uintptr, length int32)
+	fnNewProxy              func(tc int64) int64
+	fnStartProxy            func(rt, proxy int64, port int32, user, pass string) *byte
+	fnStartProxyIP          func(rt, proxy int64, ip string, port int32, user, pass string) *byte
+	fnStopProxy             func(rt, proxy int64)
+	fnFreeProxy             func(proxy int64)
+	fnConnectTunnel         func(rt, tc int64, host string, port int32, password string, enableQuic bool)
+	fnCloseTunnel           func(rt, tc int64) int32
+	fnTestTunnelDelay       func(rt int64, nodeJSON string, enableQuic bool) int64
+	fnGetTunnelUpload       func(rt, tc int64) int64
+	fnGetTunnelDownload     func(rt, tc int64) int64
+	fnGetTunnelPingDelay    func(rt, tc int64) int32
+	fnGetTunnelStatus       func(rt, tc int64) int32
+	fnGetTunnelMapperInfo   func(rt, tc int64) *byte
+	fnCloseConnect          func(rt, tc int64, key string)
+	fnGetVersion            func() *byte
+	fnFreeString            func(ptr *byte)
 }
 
 // Open 加载指定路径（或自动发现路径）的 FlyShadow 原生动态库。

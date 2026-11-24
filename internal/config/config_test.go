@@ -160,3 +160,32 @@ func TestLosslessSavePreservesUnknownFields(t *testing.T) {
 		t.Fatalf("expected 4 custom rules after delete, got %d", len(reloaded2.CustomRuleList))
 	}
 }
+
+func TestLoadInitializesDefaultConfigWhenMissingAndSavesSubscribePassword(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("expected zero-config Load to succeed, got: %v", err)
+	}
+	if cfg.ProxyPort != DefaultProxyPort || cfg.ProxyType != 3 || cfg.UUID == "" {
+		t.Fatalf("unexpected default config: port=%d type=%d uuid=%q", cfg.ProxyPort, cfg.ProxyType, cfg.UUID)
+	}
+
+	cfg.SetSubscribePassword("mock-sub-secret-123")
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reloaded, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.SubscribePassword != "mock-sub-secret-123" {
+		t.Fatalf("subscribePassword mismatch: got %q", reloaded.SubscribePassword)
+	}
+	if reloaded.UUID != cfg.UUID {
+		t.Fatalf("uuid mismatch: got %q, want %q", reloaded.UUID, cfg.UUID)
+	}
+}

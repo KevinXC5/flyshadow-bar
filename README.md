@@ -7,9 +7,9 @@
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/screenshots/nodes-dark.png" alt="深色模式 · 节点列表" width="360" />
+      <img src="docs/screenshots/nodes-dark.png" alt="深色模式 · 节点列表与实时速率图" width="360" />
       <br />
-      <sub>深色模式 · 紧凑顶栏与高容量节点列表（单屏 11+ 节点）</sub>
+      <sub>深色模式 · 实时速率折线图、订阅流量卡与节点列表</sub>
     </td>
     <td align="center" width="50%">
       <img src="docs/screenshots/nodes-light.png" alt="浅色模式 · 节点列表" width="360" />
@@ -19,14 +19,26 @@
   </tr>
   <tr>
     <td align="center" width="50%">
+      <img src="docs/screenshots/subscribe-modal-dark.png" alt="订阅密码配置弹窗" width="360" />
+      <br />
+      <sub>内置订阅密码配置 · 校验并同步节点、流量与云端规则</sub>
+    </td>
+    <td align="center" width="50%">
       <img src="docs/screenshots/rules-dark.png" alt="自定义规则管理" width="360" />
       <br />
-      <sub>自定义规则管理 · 极速添加、分组启停与热生效</sub>
+      <sub>自定义规则管理 · 分组启停、双向云端同步与热生效</sub>
     </td>
+  </tr>
+  <tr>
     <td align="center" width="50%">
       <img src="docs/screenshots/conns-dark.png" alt="实时连接监控" width="360" />
       <br />
-      <sub>实时连接监控 · 一键加为直连/代理规则并刷新连接</sub>
+      <sub>实时连接监控 · 真实客户端进程识别与一键加直连/代理</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/settings-dark.png" alt="系统设置" width="360" />
+      <br />
+      <sub>系统设置 · 代理端口、网络分流、外观主题与自动更新</sub>
     </td>
   </tr>
 </table>
@@ -49,9 +61,9 @@
 
 - **单进程直连原生核心库**：macOS 通过 `purego`、Windows 通过 `x/sys/windows` 以零 CGO 方式加载官方底层动态库（`libflyshadow_core_lib.dylib` / `flyshadow_core_lib.dll`），自动加载 GeoIP 与分流规则。
 - **菜单栏与系统托盘原生弹窗**：启动默认静默驻留 macOS 菜单栏（隐藏 Dock 图标，可选等宽字体实时速率显示）与 Windows 系统托盘（隐藏任务栏占位），不提前分配窗口对象；**左键点击图标直接在图标附近弹出无红绿灯/无边框按钮的原生圆角面板**（支持按 `Esc` 或点击面板外部自动收起），**右键弹出快捷菜单**（模式切换、节点子菜单、系统代理、UDP 加速、原生 UDP、一键测速与安全退出），macOS 与 Windows 交互一致。
-- **紧凑高容量原生 UI**：浅色 / 深色 / 跟随系统外观自适应；单屏直接展示 11+ 节点，支持搜索、收藏、按延迟排序、并发测速与一键复制终端代理环境变量。
-- **自定义规则热管理**：完整兼容官方 `~/.FlyShadow/config.json` 中的 `customRuleList`、`customRuleActiveLabels` 与全部 13 种官方匹配类型，支持极速添加、行内编辑、启停、删除与标签分组切换，修改后**无需断开隧道立即热生效**。
-- **实时连接监控与一键加规则闭环**：对接核心库 `get_tunnel_mapper_info_json` 与 `close_connect`，查看实时活跃连接的目标域名、进程名、路由结果与流量，可一键将任意目标加入直连/代理规则并踢掉旧连接使新规则即刻生效。
+- **紧凑高容量原生 UI**：浅色 / 深色 / 跟随系统外观自适应；概览区并排内置实时上下行速率折线图与订阅流量卡（流量进度、到期时间、VIP 徽标、一键同步与密码配置）；弹窗按屏幕高度自适应（大屏单屏可见 11+ 节点），支持搜索、收藏、按延迟排序与一键测速。
+- **独立订阅配置与双向云端同步**：支持零配置启动并在订阅卡片弹窗直接填写/更换订阅密码（先云端校验成功再安全落盘，失败不覆盖旧凭据），日常更新节点、流量、到期时间与管理云端自定义规则均无需再打开官方客户端；规则增删改与启停双向同步云端并立即热生效，**无需断开隧道**。
+- **实时连接监控与精准进程识别**：对接核心库 `get_tunnel_mapper_info_json` 与 `close_connect`，macOS 下自动批量反查连向本地代理的真实客户端进程（避免误标为代理自身），查看目标域名、进程名、路由结果与实时流量，并可一键加为直连/代理规则、踢掉旧连接即刻生效。
 - **单二进制内置 CLI（自动链接 PATH）**：无参数运行即启动常驻 GUI；安装运行后自动将命令行工具 `fsbar` 链接/注册到系统 `PATH` 目录（macOS 自动软链至 `/usr/local/bin`、`/opt/homebrew/bin` 或 `~/.local/bin`，Windows 安装器与运行时自动生成 `fsbar.cmd` 并写入用户 `PATH`），支持终端与 SSH 远程运维，全部命令支持 `--json` 输出。
 - **跨平台系统代理与安全退出**：支持 macOS / Windows 系统代理一键开关、启动连上后自动开启（同步 `autoSetSysProxyOnStartUp`），退出时自动关闭系统代理并安全断开隧道。
 - **无损配置写回**：按 `map[string]json.RawMessage` 原子写回 `config.json`，完整保留账号 token、订阅密码等所有原生字段；本客户端自身外观偏好独立保存在 `flyshadow-bar.prefs.json`。
@@ -123,6 +135,7 @@
 | `sysproxy [on\|off\|toggle]` | - | 开启、关闭或切换操作系统代理 |
 | `ping` | - | 触发全量节点并发延迟测速并按延迟排序输出 |
 | `reload` | - | 重新加载 `config.json` 与域名分流规则并刷新引擎状态 |
+| `sync` | - | 从云端同步最新订阅节点、套餐流量、到期时间与自定义规则 |
 | `rules` | `rule ls` | 列出所有自定义分流规则（ID、状态、匹配类型、规则值、动作、标签） |
 | `rule add <value>` | - | 快速添加自定义规则并立即热生效（支持 `--match`、`--action`、`--label`） |
 | `rule toggle <id>` | - | 启用或禁用指定自定义规则并热生效 |

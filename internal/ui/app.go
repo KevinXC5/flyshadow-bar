@@ -241,13 +241,14 @@ func (a *App) ensureWindow() {
 	} else {
 		a.vm.snap = a.eng.Snapshot()
 	}
+	winH := calcPreferredPopoverHeight()
 	a.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:             "FlyShadow Bar",
 		Width:             500,
-		Height:            740,
+		Height:            winH,
 		MinWidth:          440,
-		MinHeight:         560,
-		StateKey:          "popover-v3",
+		MinHeight:         600,
+		StateKey:          "popover-v5",
 		Hidden:            true,
 		SkipTaskbar:       true,
 		AlwaysOnTop:       true,
@@ -269,7 +270,7 @@ func (a *App) ensureWindow() {
 		if a.quitting || a.pinWindow || a.win == nil || !a.win.IsVisible() {
 			return
 		}
-		if a.vm != nil && (a.vm.activeTab == 2 || a.vm.updateDownloading) {
+		if a.vm != nil && (a.vm.activeTab == 2 || a.vm.updateDownloading || a.vm.subModalOpen || a.vm.subSaving) {
 			return
 		}
 		a.lastBlurHide = time.Now()
@@ -419,6 +420,27 @@ func (a *App) positionWindowNearTray() {
 	if x, y, ok := calcTrayPopoverPos(trayRect, workArea, winW, winH, runtime.GOOS); ok {
 		a.win.SetPosition(x, y)
 	}
+}
+
+// calcPreferredPopoverHeight 根据主屏工作区高度自适应弹窗高度：
+// 大屏最高取 900px 让单屏展示更多节点，小屏则留足安全余量避免顶住 Dock / 任务栏。
+func calcPreferredPopoverHeight() int {
+	disp := mygo.Screen.PrimaryDisplay()
+	workH := disp.WorkArea.Height
+	if workH <= 0 {
+		workH = disp.Bounds.Height
+	}
+	if workH <= 0 {
+		return 880
+	}
+	target := int(float64(workH) * 0.86)
+	if target > 900 {
+		target = 900
+	}
+	if target < 680 {
+		target = max(600, workH-36)
+	}
+	return target
 }
 
 // calcTrayPopoverPos 计算窗口紧贴菜单栏 / 系统托盘图标的弹出坐标，并夹紧在屏幕工作区内。

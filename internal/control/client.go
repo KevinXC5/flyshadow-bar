@@ -117,6 +117,14 @@ func (c *Client) Reload(ctx context.Context) (*engine.Snapshot, error) {
 	return &snap, nil
 }
 
+func (c *Client) Sync(ctx context.Context) (*engine.Snapshot, error) {
+	var snap engine.Snapshot
+	if err := c.do(ctx, http.MethodPost, "/api/v1/sync", nil, &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
 func (c *Client) Rules(ctx context.Context) ([]config.DomainRule, error) {
 	var resp struct {
 		Rules []config.DomainRule `json:"rules"`

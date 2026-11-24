@@ -27,6 +27,7 @@
 - **单二进制双形态（CLI 名称 `fsbar`）**：入口位于 `cmd/fsbar/`，无参数或仅带 GUI 标志（`--gui`/`--hidden`/`--config`/`--core-lib`/`--no-connect`/`--no-auto-sysproxy`/`-psn_*`）时启动常驻 GUI；携带子命令时通过本地回环 Bearer Token 控制接口（`~/.FlyShadow/flyshadow-bar.run.json`，权限 `0600`）与运行中实例通信，且所有子命令均支持 `fsbar help <子命令>` 与 `--help`。
 - **包职责划分**：
   - `internal/cliinstall`：跨平台命令行工具 `fsbar` 自动链接/注册到系统 `PATH` 目录与冲突保护。
+  - `internal/cloud`：官方云端订阅与自定义分流规则双向同步客户端（DoH TXT 发现、代理/直连自动回退、凭据脱敏）。
   - `internal/config`：无损配置加载/保存、节点匹配、13 种官方分流规则与自定义规则 CRUD、客户端独立偏好 `flyshadow-bar.prefs.json`。
   - `internal/core`：零 CGO FFI 绑定（macOS `purego`、Windows `golang.org/x/sys/windows`）、核心动态库与 GeoIP 自动定位及 JAR 解压缓存。
   - `internal/sysproxy`：跨平台系统代理（macOS `networksetup`、Windows 注册表 + `wininet.dll`）。

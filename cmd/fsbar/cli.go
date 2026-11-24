@@ -210,6 +210,23 @@ func runCLI(args []string) error {
 		fmt.Printf("已重载配置（节点 %d 个，分流规则 %d 条）\n", len(snap.Nodes), snap.RuleCount)
 		return nil
 
+	case "sync":
+		snap, err := cli.Sync(ctx)
+		if err != nil {
+			return err
+		}
+		if jsonOut {
+			return writeIndentedJSON(snap)
+		}
+		msg := fmt.Sprintf("已同步订阅（节点 %d 个，自定义规则 %d 条）", len(snap.Nodes), len(snap.CustomRules))
+		if snap.Traffic != nil && snap.Traffic.TrafficSize > 0 {
+			used := snap.Traffic.TrafficUpload + snap.Traffic.TrafficDownload
+			msg += fmt.Sprintf(" · 流量 %s / %s · 到期 %s",
+				ui.FormatBytes(used), ui.FormatBytes(snap.Traffic.TrafficSize), ui.FormatExpireDate(int64(snap.Traffic.ExpireTime)))
+		}
+		fmt.Println(msg)
+		return nil
+
 	case "rules":
 		rules, err := cli.Rules(ctx)
 		if err != nil {
@@ -616,6 +633,7 @@ CLI 全局选项（可放在任意位置，适用于所有子命令）:
   native-udp [on|off|toggle]                开关原生 UDP 转发并热重连，省略参数默认 toggle
   sysproxy [on|off|toggle]                  开关操作系统代理，省略参数默认 toggle
   reload                                    重新读取 ~/.FlyShadow/config.json 并热刷新规则与配置
+  sync                                      从云端同步最新订阅节点、流量用量、到期时间与自定义规则
 
 自定义分流规则（立即热生效，不断开当前隧道）:
   rules | rule ls                           列出所有自定义分流规则（ID、启停、匹配类型、规则值、动作、标签）
@@ -801,6 +819,18 @@ func printCommandHelp(w io.Writer, raw string) error {
 示例:
   fsbar reload
   fsbar reload --json
+`)
+	case "sync":
+		fmt.Fprint(w, `用法:
+  fsbar sync [--json] [--run-file <路径>]
+
+说明:
+  使用 config.json 中的订阅凭据从云端拉取最新节点列表、套餐流量用量、
+  到期时间、VIP 等级与自定义分流规则，无损写回本地并立即热重载规则。
+
+示例:
+  fsbar sync
+  fsbar sync --json
 `)
 	case "rules", "rule":
 		fmt.Fprint(w, `用法:

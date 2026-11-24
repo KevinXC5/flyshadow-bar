@@ -34,7 +34,13 @@ func TestMainViewRendersCleanly(t *testing.T) {
 		},
 		UploadSpeedBps:   12800,
 		DownloadSpeedBps: 2048000,
-		TunnelPingMs:     42,
+		SpeedHistory: []engine.SpeedSample{
+			{UploadBps: 4096, DownloadBps: 120000},
+			{UploadBps: 8192, DownloadBps: 850000},
+			{UploadBps: 12800, DownloadBps: 2048000},
+		},
+		HasCloudAuth: true,
+		TunnelPingMs: 42,
 		CurrentNode: &engine.NodeSnapshot{
 			ID:          1,
 			DisplayName: "香港 IEPL 01",
@@ -59,6 +65,8 @@ func TestMainViewRendersCleanly(t *testing.T) {
 			TrafficSize:     500 * 1024 * 1024 * 1024,
 			TrafficUpload:   12 * 1024 * 1024 * 1024,
 			TrafficDownload: 88 * 1024 * 1024 * 1024,
+			Level:           3,
+			ExpireTime:      config.FlexMillis(1796610616000),
 		},
 	}
 
@@ -67,16 +75,33 @@ func TestMainViewRendersCleanly(t *testing.T) {
 		{Protocol: "TCP", SourceAddr: "127.0.0.1", SourcePort: 54321, TargetAddr: "api.openai.com", TargetPort: 443, ProcessName: "curl", ProxyType: "Proxy", UploadTrafficTotal: 2048, DownloadTrafficTotal: 8192},
 	}
 
-	// 验证节点页渲染与筛选交互
+	// 验证节点页渲染、无冗余计数与筛选交互
 	tt := ui.NewTester(vm.render, 500, 780)
 	if !tt.HasText("香港 IEPL 01") || !tt.HasText("日本 东京 02") {
 		t.Fatalf("node list missing expected text, got: %v", tt.Texts())
 	}
+	if !tt.HasText("共 3 个节点") {
+		t.Fatalf("unfiltered node summary should be concise, got: %v", tt.Texts())
+	}
 	if err := tt.Click("收藏"); err != nil {
 		t.Fatalf("click 收藏: %v", err)
 	}
-	if !vm.onlyStarred || tt.HasText("日本 东京 02") {
-		t.Fatalf("onlyStarred filter did not take effect: onlyStarred=%v", vm.onlyStarred)
+	if !vm.onlyStarred || tt.HasText("日本 东京 02") || !tt.HasText("显示 1 / 3 个节点") {
+		t.Fatalf("onlyStarred filter did not take effect: onlyStarred=%v, texts=%v", vm.onlyStarred, tt.Texts())
+	}
+
+	// 验证点击流量卡上的订阅密码图标可打开模态弹窗，点击取消可关闭
+	if err := tt.Click("配置订阅密码"); err != nil {
+		t.Fatalf("click 配置订阅密码: %v", err)
+	}
+	if !vm.subModalOpen || !tt.HasText("更换订阅密码") || !tt.HasText("保存并同步") {
+		t.Fatalf("subscribe password modal did not open cleanly: open=%v texts=%v", vm.subModalOpen, tt.Texts())
+	}
+	if err := tt.Click("取消"); err != nil {
+		t.Fatalf("click 取消: %v", err)
+	}
+	if vm.subModalOpen {
+		t.Fatalf("subscribe password modal did not close after clicking 取消")
 	}
 
 	// 切换到规则页验证渲染
@@ -99,15 +124,15 @@ func TestMainViewRendersCleanly(t *testing.T) {
 	if err := tt.Click("设置"); err != nil {
 		t.Fatalf("click 设置: %v", err)
 	}
-	if vm.activeTab != 3 || !tt.HasText("混合代理端口 (HTTP/SOCKS5)") {
+	if vm.activeTab != 3 || !tt.HasText("代理端口") {
 		t.Fatalf("settings tab did not render expected content, activeTab=%d", vm.activeTab)
 	}
 
-	// 验证后台增量更新就绪后顶部醒目「重启更新」横幅渲染
+	// 验证后台增量更新就绪后顶部醒目「立即重启」横幅渲染
 	vm.updateInstalled = true
 	vm.updateAvailable = "0.2.2"
 	ttReady := ui.NewTester(vm.render, 500, 780)
-	if !ttReady.HasText("新版本 0.2.2 已下载就绪") || !ttReady.HasText("重启更新") {
+	if !ttReady.HasText("新版本 0.2.2 已就绪") || !ttReady.HasText("立即重启") {
 		t.Fatalf("update ready banner missing expected text, got: %v", ttReady.Texts())
 	}
 

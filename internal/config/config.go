@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -211,17 +213,69 @@ func (u UsedNodeInfo) ToNode() Node {
 	}
 }
 
+// FlexMillis 兼容官方 GsonUtil 的日期编解码：反序列化同时支持毫秒时间戳与日期字符串，
+// 序列化统一写为毫秒整数，确保与官方 config.json 及云端 API 完全兼容。
+type FlexMillis int64
+
+func (m *FlexMillis) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "" || s == "null" {
+		*m = 0
+		return nil
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		*m = FlexMillis(n)
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return err
+	}
+	str = strings.TrimSpace(str)
+	if str == "" {
+		*m = 0
+		return nil
+	}
+	if n, err := strconv.ParseInt(str, 10, 64); err == nil {
+		*m = FlexMillis(n)
+		return nil
+	}
+	// 官方服务端时间默认 GMT+8，同时兼容常见 ISO8601 / RFC3339 格式
+	cst := time.FixedZone("CST", 8*3600)
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.ParseInLocation(layout, str, cst); err == nil {
+			*m = FlexMillis(t.UnixMilli())
+			return nil
+		}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, str); err == nil {
+			*m = FlexMillis(t.UnixMilli())
+			return nil
+		}
+	}
+	return fmt.Errorf("无法解析时间戳: %q", str)
+}
+
+func (m FlexMillis) MarshalJSON() ([]byte, error) {
+	return strconv.AppendInt(nil, int64(m), 10), nil
+}
+
 // DomainRule 表示一条域名/网络分流规则（来自 subscribeInfo.customRule 或 customRuleList）。
 type DomainRule struct {
-	ID                 int    `json:"id,omitempty"`
-	Enable             *int   `json:"enable,omitempty"`
-	Label              string `json:"label"`
-	Domain             string `json:"domain"`
-	Matching           int    `json:"matching"`
-	ProxyType          int    `json:"proxyType"`
-	DirectConnPriority int    `json:"directConnPriority"`
-	CreateTime         int64  `json:"createTime,omitempty"`
-	Sort               int    `json:"sort"`
+	ID                 int        `json:"id,omitempty"`
+	Enable             *int       `json:"enable,omitempty"`
+	Label              string     `json:"label"`
+	Domain             string     `json:"domain"`
+	Matching           int        `json:"matching"`
+	ProxyType          int        `json:"proxyType"`
+	DirectConnPriority int        `json:"directConnPriority"`
+	CreateTime         FlexMillis `json:"createTime,omitempty"`
+	Sort               int        `json:"sort"`
 }
 
 // IsEnabled 返回该自定义规则是否启用（未显式设置时默认启用）。
@@ -232,12 +286,13 @@ func (r DomainRule) IsEnabled() bool {
 // IntPtr 构造 int 指针。
 func IntPtr(v int) *int { return &v }
 
-// UserTrafficInfo 保存订阅用户的非敏感流量与到期统计。
+// UserTrafficInfo 保存订阅用户的非敏感流量、VIP 等级与到期统计。
 type UserTrafficInfo struct {
-	TrafficSize     int64 `json:"trafficSize"`
-	TrafficUpload   int64 `json:"trafficUpload"`
-	TrafficDownload int64 `json:"trafficDownload"`
-	ExpireTime      int64 `json:"expireTime"` // 毫秒时间戳
+	TrafficSize     int64      `json:"trafficSize"`
+	TrafficUpload   int64      `json:"trafficUpload"`
+	TrafficDownload int64      `json:"trafficDownload"`
+	Level           int        `json:"level,omitempty"`
+	ExpireTime      FlexMillis `json:"expireTime"` // 毫秒时间戳
 }
 
 // SubscribeInfo 只解析我们关心的节点、内置规则与流量统计，其余字段由 raw map 无损保留。
@@ -252,6 +307,8 @@ type Config struct {
 	Path string
 
 	SubscribeInfo             SubscribeInfo
+	SubscribePassword         string // 仅用于调用官方订阅与规则同步 API，绝不暴露至快照或日志
+	LastUpdateTime            FlexMillis
 	CustomRuleList            []DomainRule
 	CustomRuleActiveLabels    []string
 	UsedNodeInfo              *UsedNodeInfo
@@ -271,7 +328,10 @@ type Config struct {
 	UUID                      string
 	StarNodeIDList            []int
 
-	raw map[string]json.RawMessage
+	subscribeDirty         bool
+	subscribePasswordDirty bool
+	uuidDirty              bool
+	raw                    map[string]json.RawMessage
 }
 
 // AppPrefs 保存 flyshadow-bar 自身的轻量界面偏好，避免污染官方 config.json。
@@ -326,6 +386,20 @@ func Load(path string) (*Config, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// 全新环境无 config.json 时自动初始化默认配置，用户可直接在客户端内填订阅密码完成初始化
+			return &Config{
+				Path:                      path,
+				ProxyPort:                 DefaultProxyPort,
+				ProxyType:                 3, // 默认 Rule 模式
+				UDPProxyType:              3,
+				UseBuildInDNS:             true,
+				DirectConnPriorityTimeout: DefaultDirectConnTimeout,
+				UUID:                      newRandomUUID(),
+				uuidDirty:                 true,
+				raw:                       make(map[string]json.RawMessage),
+			}, nil
+		}
 		return nil, fmt.Errorf("读取配置文件失败 (%s): %w", path, err)
 	}
 
@@ -345,6 +419,8 @@ func Load(path string) (*Config, error) {
 	}
 
 	unmarshalField(raw, "subscribeInfo", &cfg.SubscribeInfo)
+	unmarshalField(raw, "subscribePassword", &cfg.SubscribePassword)
+	unmarshalField(raw, "lastUpdateTime", &cfg.LastUpdateTime)
 	unmarshalField(raw, "customRuleList", &cfg.CustomRuleList)
 	unmarshalField(raw, "customRuleActiveLabels", &cfg.CustomRuleActiveLabels)
 	unmarshalField(raw, "usedNodeInfo", &cfg.UsedNodeInfo)
@@ -387,6 +463,26 @@ func (c *Config) Save() error {
 		c.raw = make(map[string]json.RawMessage)
 	}
 
+	if c.subscribeDirty {
+		if err := setRawField(c.raw, "subscribeInfo", c.SubscribeInfo); err != nil {
+			return err
+		}
+		if c.LastUpdateTime > 0 {
+			if err := setRawField(c.raw, "lastUpdateTime", c.LastUpdateTime); err != nil {
+				return err
+			}
+		}
+	}
+	if c.subscribePasswordDirty {
+		if err := setRawField(c.raw, "subscribePassword", c.SubscribePassword); err != nil {
+			return err
+		}
+	}
+	if c.uuidDirty && c.UUID != "" {
+		if err := setRawField(c.raw, "uuid", c.UUID); err != nil {
+			return err
+		}
+	}
 	if c.UsedNodeInfo != nil {
 		if err := setRawField(c.raw, "usedNodeInfo", c.UsedNodeInfo); err != nil {
 			return err
@@ -469,7 +565,7 @@ func (c *Config) AddCustomRule(rule DomainRule) (DomainRule, error) {
 		rule.Enable = IntPtr(1)
 	}
 	if rule.CreateTime == 0 {
-		rule.CreateTime = time.Now().UnixMilli()
+		rule.CreateTime = FlexMillis(time.Now().UnixMilli())
 	}
 	if rule.ID <= 0 {
 		maxID := 0
@@ -547,6 +643,101 @@ func (c *Config) ToggleCustomRule(id int) (bool, error) {
 		}
 	}
 	return false, fmt.Errorf("未找到 ID 为 %d 的自定义规则", id)
+}
+
+// SetSubscribePassword 更新内存中的订阅密码并标记待写回（仅在云端校验通过后由引擎调用）。
+func (c *Config) SetSubscribePassword(password string) {
+	if c == nil {
+		return
+	}
+	c.SubscribePassword = strings.TrimSpace(password)
+	c.subscribePasswordDirty = true
+}
+
+func newRandomUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("fsbar-%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	var out [36]byte
+	hex.Encode(out[0:8], b[0:4])
+	out[8] = '-'
+	hex.Encode(out[9:13], b[4:6])
+	out[13] = '-'
+	hex.Encode(out[14:18], b[6:8])
+	out[18] = '-'
+	hex.Encode(out[19:23], b[8:10])
+	out[23] = '-'
+	hex.Encode(out[24:36], b[10:16])
+	return string(out[:])
+}
+
+// ApplySyncedData 将云端拉取的最新订阅信息（节点、流量、到期时间、内置规则）与自定义规则合并到配置中，
+// 同时按节点 ID 同步刷新当前选中节点参数，保留用户收藏、代理偏好及其他未建模字段。
+func (c *Config) ApplySyncedData(sub SubscribeInfo, customRules []DomainRule, now time.Time) {
+	if c == nil {
+		return
+	}
+	c.SubscribeInfo = sub
+	c.subscribeDirty = true
+	if !now.IsZero() {
+		c.LastUpdateTime = FlexMillis(now.UnixMilli())
+	}
+	if customRules != nil {
+		c.CustomRuleList = append([]DomainRule(nil), customRules...)
+	}
+
+	// 若当前选中节点在最新订阅列表中存在，刷新其最新连接参数；若原节点已下线且新列表非空则切到首个节点
+	if len(sub.Nodes) > 0 {
+		if c.UsedNodeInfo != nil {
+			matched := false
+			for _, n := range sub.Nodes {
+				if n.ID == c.UsedNodeInfo.ID {
+					u := n.ToUsedNodeInfo()
+					c.UsedNodeInfo = &u
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				u := sub.Nodes[0].ToUsedNodeInfo()
+				c.UsedNodeInfo = &u
+			}
+		} else {
+			u := sub.Nodes[0].ToUsedNodeInfo()
+			c.UsedNodeInfo = &u
+		}
+	}
+}
+
+// ReplaceCustomRules 使用云端最新自定义规则列表替换本地缓存，并确保新出现规则标签处于激活状态。
+func (c *Config) ReplaceCustomRules(rules []DomainRule, activeLabel string) {
+	if c == nil {
+		return
+	}
+	if rules == nil {
+		c.CustomRuleList = []DomainRule{}
+	} else {
+		c.CustomRuleList = append([]DomainRule(nil), rules...)
+	}
+	if activeLabel != "" {
+		c.ensureRuleLabelActive(activeLabel)
+	}
+}
+
+// FindCustomRule 按 ID 查找自定义规则副本。
+func (c *Config) FindCustomRule(id int) (DomainRule, bool) {
+	if c == nil {
+		return DomainRule{}, false
+	}
+	for _, r := range c.CustomRuleList {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return DomainRule{}, false
 }
 
 // RuleLabels 返回所有出现过的规则标签列表（始终以 "__DEFAULT__" 为首）。
