@@ -212,5 +212,5 @@ make release-local
    ```
 2. GitHub Actions 将自动依次完成：
    - **准备草稿（prepare）**：校验标签规范与 `origin/main` 祖先关系，防止覆盖已公开版本，并调用 DeepSeek API（需在仓库 Secrets 中配置 `DEEPSEEK_API_KEY`）基于提交记录自动生成面向用户的简体中文更新说明，创建 Draft Release。
-   - **测试与双平台并行构建（check / build-macos / build-windows）**：运行单元测试与 macOS/Windows 双平台 `go vet`，在 `macos-14` 构建 `darwin/arm64` `.app`/`.zip`，在 `ubuntu-latest` 零 CGO 交叉编译 `windows/amd64` `.exe`/`.zip` 并上传至草稿。
+   - **测试与双平台并行构建（check / build-macos / build-windows）**：运行单元测试与 macOS/Windows 双平台 `go vet`，在 `macos-latest` 构建 `darwin/arm64` `.app`/`.zip`，在 `ubuntu-latest` 零 CGO 交叉编译 `windows/amd64` `.exe`/`.zip` 并上传至草稿。
    - **校验与公开发布（publish）**：验证全部产物齐全，生成 `checksums.txt` 上传并将草稿转为正式最新 Release；若中间任一环节失败或取消，**cleanup** 会自动删除未公开草稿。
