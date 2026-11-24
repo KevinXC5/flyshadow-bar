@@ -25,14 +25,17 @@ type RunOptions struct {
 	DisableAutoSysProxy bool
 }
 
-// App 串联 Engine、本地控制服务、系统托盘与 MyGo Native UI 主窗口。
+// App 串联 Engine、本地控制服务、系统托盘、增量更新与 MyGo Native UI 主窗口。
 type App struct {
-	eng   *engine.Engine
-	ctrl  *control.Server
-	tray  *trayController
-	win   *mygo.Window
-	vm    *viewModel
-	prefs config.AppPrefs
+	eng     *engine.Engine
+	ctrl    *control.Server
+	tray    *trayController
+	win     *mygo.Window
+	vm      *viewModel
+	updates *UpdateManager
+	prefs   config.AppPrefs
+
+	updateProgressReset func()
 
 	quitting  bool
 	unsub     func()
@@ -43,7 +46,13 @@ type App struct {
 // Run 启动单进程 GUI/托盘桌面应用，阻塞直至应用退出。
 func Run(opts RunOptions) error {
 	mygo.App.SetName("FlyShadow Bar")
-	mygo.App.SetVersion(version.Version)
+	// 正式打包由 mygo build 注入 packageVersion；仅在未注入时回退到 version.Version，
+	// 避免覆盖 mygo.Updater 用于匹配增量补丁的当前版本号。
+	if v := mygo.App.Version(); v != "" && v != "0.0.0" {
+		version.Version = v
+	} else {
+		mygo.App.SetVersion(version.Version)
+	}
 
 	if !mygo.App.RequestSingleInstanceLock() {
 		return nil
@@ -71,6 +80,13 @@ func Run(opts RunOptions) error {
 		prefs:  prefs,
 		stopCh: make(chan struct{}),
 	}
+	app.updates = newUpdateManager(func() {
+		mygo.RunOnMain(func() {
+			app.quitting = true
+			app.cleanup()
+			mygo.App.Relaunch()
+		})
+	})
 
 	// 启动本地控制服务（供 CLI 与 SSH 终端操作运行中的实例）
 	ctrlSrv, err := control.StartServer(eng, control.ServerOptions{
@@ -173,6 +189,29 @@ func (a *App) onReady(opts RunOptions) {
 
 	// 仅在窗口打开且位于「连接」页时按需轮询活跃连接，平时零额外开销
 	go a.connectionsPollLoop()
+
+	// 绑定 MyGo 签名增量更新的后台通知与进度节流回调
+	if a.updates != nil {
+		a.updates.availableFn = func(st UpdateStatus) {
+			a.updateWindow(func() {
+				if a.vm != nil {
+					a.vm.applyNativeUpdateStatus(st)
+				}
+			})
+			mygo.RunOnMain(func() { a.refreshTrayMenu() })
+		}
+		fn, reset := newThrottledUpdateProgress(func(downloaded, total int64) {
+			a.updateWindow(func() {
+				if a.vm != nil {
+					a.vm.updateDownloaded = downloaded
+					a.vm.updateTotal = total
+				}
+			})
+		})
+		a.updates.progressFn = fn
+		a.updateProgressReset = reset
+		a.updates.StartBackground(a.stopCh)
+	}
 }
 
 func (a *App) connectionsPollLoop() {
@@ -263,6 +302,13 @@ func (a *App) toggleWindow() {
 	} else {
 		a.showWindow()
 	}
+}
+
+func (a *App) openSettingsTab() {
+	if a.vm != nil {
+		a.vm.activeTab = 3
+	}
+	a.showWindow()
 }
 
 func (a *App) refreshTrayMenu() {

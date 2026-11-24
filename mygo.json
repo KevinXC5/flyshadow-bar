@@ -1,0 +1,21 @@
+{
+  "name": "FlyShadow Bar",
+  "slug": "flyshadow-bar",
+  "identifier": "com.kevinxc.flyshadow-bar",
+  "version": "0.1.0-dev",
+  "main": "./cmd/flyshadow-bar",
+  "out": "dist",
+  "macos": {
+    "minimumSystemVersion": "13.0",
+    "infoPlist": {
+      "CFBundleDevelopmentRegion": "zh_CN",
+      "LSUIElement": true
+    }
+  },
+  "updates": {
+    "github": "KevinXC5/flyshadow-bar",
+    "publicKey": "3Na40cmke9WwocCeifE65O+Ow7kdBxzq1l3Yaeu5qEc=",
+    "deltas": 3,
+    "changelog": ".github/release-notes.md"
+  }
+}

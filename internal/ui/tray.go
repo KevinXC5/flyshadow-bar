@@ -37,7 +37,7 @@ func newTrayController(app *App) (*trayController, error) {
 
 	snap := app.eng.Snapshot()
 	tc.menu = tc.buildMenu(snap)
-	tc.lastNodeSig = nodeMenuSignature(snap)
+	tc.lastNodeSig = tc.menuSignature(snap)
 	tc.lastConnected = snap.State == engine.StateConnected
 	tc.hasInitialized = true
 
@@ -87,8 +87,8 @@ func (tc *trayController) Update(snap engine.Snapshot) {
 	tc.tray.SetToolTip(trayTooltip(snap))
 	tc.syncTitle(snap)
 
-	// 若节点列表结构发生变化（增删节点、收藏变化、重载），重建菜单；否则增量更新避免打断用户浏览菜单
-	sig := nodeMenuSignature(snap)
+	// 若节点列表或更新提示发生变化，重建菜单；否则增量更新避免打断用户浏览菜单
+	sig := tc.menuSignature(snap)
 	if sig != tc.lastNodeSig {
 		tc.lastNodeSig = sig
 		tc.menu = tc.buildMenu(snap)
@@ -350,15 +350,39 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 				go func() { _ = tc.app.eng.Reload() }()
 			},
 		},
+	}
+
+	if tc.app != nil && tc.app.updates != nil {
+		st := tc.app.updates.Status()
+		if st.Installed {
+			items = append(items, &mygo.MenuItem{
+				ID:    "action-update-restart",
+				Label: fmt.Sprintf("更新 %s 已就绪 · 立即重启", st.Available),
+				Click: func(*mygo.MenuItem, *mygo.Window) {
+					_ = tc.app.updates.Restart()
+				},
+			})
+		} else if st.Available != "" {
+			items = append(items, &mygo.MenuItem{
+				ID:    "action-update-open",
+				Label: fmt.Sprintf("发现新版本 %s（增量更新）", st.Available),
+				Click: func(*mygo.MenuItem, *mygo.Window) {
+					tc.app.openSettingsTab()
+				},
+			})
+		}
+	}
+
+	items = append(items,
 		mygo.Separator(),
-		{
+		&mygo.MenuItem{
 			ID:    "action-quit",
 			Label: "退出 FlyShadow Bar",
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				mygo.App.Quit()
 			},
 		},
-	}
+	)
 
 	return mygo.NewMenu(items)
 }
@@ -403,10 +427,14 @@ func trayTooltip(snap engine.Snapshot) string {
 	)
 }
 
-func nodeMenuSignature(snap engine.Snapshot) string {
+func (tc *trayController) menuSignature(snap engine.Snapshot) string {
 	var b strings.Builder
 	for _, n := range snap.Nodes {
 		fmt.Fprintf(&b, "%d:%s:%t;", n.ID, n.DisplayName, n.Starred)
+	}
+	if tc.app != nil && tc.app.updates != nil {
+		st := tc.app.updates.Status()
+		fmt.Fprintf(&b, "|u:%s:%t", st.Available, st.Installed)
 	}
 	return b.String()
 }

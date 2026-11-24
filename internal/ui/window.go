@@ -47,14 +47,22 @@ type viewModel struct {
 	connSearchQuery string
 	connsPaused     bool
 
-	checkingUpdate bool
-	updateResult   *updater.CheckResult
-	updateErr      string
-	toastMsg       string
+	checkingUpdate      bool
+	updateNativeEnabled bool
+	updateAvailable     string
+	updateNotes         string
+	updateInstalled     bool
+	updateDownloading   bool
+	updateDownloaded    int64
+	updateTotal         int64
+	updateCancel        context.CancelFunc
+	updateResult        *updater.CheckResult
+	updateErr           string
+	toastMsg            string
 }
 
 func newViewModel(app *App, initial engine.Snapshot) *viewModel {
-	return &viewModel{
+	vm := &viewModel{
 		app:              app,
 		snap:             initial,
 		portDraft:        strconv.Itoa(initial.ProxyPort),
@@ -62,6 +70,17 @@ func newViewModel(app *App, initial engine.Snapshot) *viewModel {
 		ruleActionDraft:  2,
 		ruleFilterAction: -1,
 	}
+	if app != nil && app.updates != nil {
+		vm.applyNativeUpdateStatus(app.updates.Status())
+	}
+	return vm
+}
+
+func (vm *viewModel) applyNativeUpdateStatus(st UpdateStatus) {
+	vm.updateNativeEnabled = st.Enabled
+	vm.updateAvailable = st.Available
+	vm.updateNotes = st.Notes
+	vm.updateInstalled = st.Installed
 }
 
 // palette 定义浅色 / 深色下的克制配色层次，主视觉为冷静的靛青蓝点缀。
@@ -659,36 +678,84 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				renderKVRow(c, p, "配置文件", nonEmpty(snap.ConfigPath, "未知"))
 
 				ui.Divider(c)
-				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-					updateText := "基于 GitHub Releases 检查更新"
-					updateColor := p.textMuted
-					if vm.checkingUpdate {
-						updateText = "正在检查新版本…"
-						updateColor = p.accent
-					} else if vm.updateErr != "" {
-						updateText = vm.updateErr
-						updateColor = p.danger
-					} else if vm.updateResult != nil {
-						if vm.updateResult.HasUpdate {
-							updateText = fmt.Sprintf("发现新版本 %s", vm.updateResult.LatestVersion)
-							updateColor = p.success
-						} else {
-							updateText = fmt.Sprintf("已是最新版本 (%s)", version.Version)
-							updateColor = p.textSecondary
+				ui.Column(c).Gap(6).Children(func() {
+					ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+						updateText := "支持签名增量更新（GitHub Releases）"
+						if !vm.updateNativeEnabled {
+							updateText = "基于 GitHub Releases 检查更新"
 						}
-					}
-					ui.Text(c, updateText).Grow(1).FontSize(11.5).TextColor(updateColor).Wrap()
-
-					if vm.updateResult != nil && vm.updateResult.HasUpdate && vm.updateResult.ReleaseURL != "" {
-						if ui.PrimaryButton(c.Key("btn-open-release"), "前往下载").Padding(5, 11).Radius(7).Clicked() {
-							url := vm.updateResult.ReleaseURL
-							if vm.app != nil {
-								go func() { _ = mygo.Shell.OpenExternal(url) }()
+						updateColor := p.textMuted
+						switch {
+						case vm.updateInstalled:
+							updateText = fmt.Sprintf("新版本 %s 已安装就绪，重启后生效", vm.updateAvailable)
+							updateColor = p.success
+						case vm.updateDownloading:
+							if vm.updateTotal > 0 {
+								pct := min(100, int(vm.updateDownloaded*100/vm.updateTotal))
+								updateText = fmt.Sprintf("正在增量下载 %s（%d%% · %s / %s）…",
+									vm.updateAvailable, pct, FormatBytes(vm.updateDownloaded), FormatBytes(vm.updateTotal))
+							} else if vm.updateDownloaded > 0 {
+								updateText = fmt.Sprintf("正在下载 %s（已下载 %s）…", vm.updateAvailable, FormatBytes(vm.updateDownloaded))
+							} else {
+								updateText = fmt.Sprintf("正在连接更新源下载 %s…", vm.updateAvailable)
+							}
+							updateColor = p.accent
+						case vm.checkingUpdate:
+							updateText = "正在检查新版本…"
+							updateColor = p.accent
+						case vm.updateErr != "":
+							updateText = vm.updateErr
+							updateColor = p.danger
+						case vm.updateNativeEnabled && vm.updateAvailable != "":
+							updateText = fmt.Sprintf("发现新版本 %s（支持签名增量更新）", vm.updateAvailable)
+							updateColor = p.success
+						case vm.updateResult != nil:
+							if vm.updateResult.HasUpdate {
+								updateText = fmt.Sprintf("发现新版本 %s", vm.updateResult.LatestVersion)
+								updateColor = p.success
+							} else {
+								updateText = fmt.Sprintf("已是最新版本 (%s)", version.Version)
+								updateColor = p.textSecondary
 							}
 						}
-					}
-					if ui.Button(c.Key("btn-check-update"), "检查更新").Disabled(vm.checkingUpdate).Padding(5, 11).Radius(7).Clicked() {
-						vm.checkUpdate()
+						ui.Text(c, updateText).Grow(1).FontSize(11.5).TextColor(updateColor).Wrap()
+
+						switch {
+						case vm.updateInstalled:
+							if ui.PrimaryButton(c.Key("btn-restart-update"), "重启并应用").Padding(5, 11).Radius(7).Clicked() {
+								vm.restartForUpdate()
+							}
+						case vm.updateDownloading:
+							if ui.Button(c.Key("btn-cancel-update"), "取消").Padding(5, 11).Radius(7).Clicked() {
+								vm.cancelUpdateDownload()
+							}
+						case vm.updateNativeEnabled && vm.updateAvailable != "":
+							if ui.PrimaryButton(c.Key("btn-install-update"), "增量更新").Padding(5, 11).Radius(7).Clicked() {
+								vm.installNativeUpdate()
+							}
+						case vm.updateResult != nil && vm.updateResult.HasUpdate && vm.updateResult.ReleaseURL != "":
+							if ui.PrimaryButton(c.Key("btn-open-release"), "前往下载").Padding(5, 11).Radius(7).Clicked() {
+								url := vm.updateResult.ReleaseURL
+								if vm.app != nil {
+									go func() { _ = mygo.Shell.OpenExternal(url) }()
+								}
+							}
+						}
+						if !vm.updateDownloading && !vm.updateInstalled {
+							if ui.Button(c.Key("btn-check-update"), "检查更新").Disabled(vm.checkingUpdate).Padding(5, 11).Radius(7).Clicked() {
+								vm.checkUpdate()
+							}
+						}
+					})
+
+					if vm.updateNativeEnabled && vm.updateAvailable != "" && strings.TrimSpace(vm.updateNotes) != "" && !vm.updateInstalled {
+						notes := strings.TrimSpace(vm.updateNotes)
+						if len([]rune(notes)) > 260 {
+							notes = string([]rune(notes)[:260]) + "…"
+						}
+						ui.Column(c).Padding(8, 10).Radius(8).Background(p.cardElevated).Children(func() {
+							ui.Text(c, notes).FontSize(11).TextColor(p.textSecondary).Wrap()
+						})
 					}
 				})
 			})
@@ -697,11 +764,38 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 }
 
 func (vm *viewModel) checkUpdate() {
-	if vm.app == nil {
+	if vm.app == nil || vm.checkingUpdate || vm.updateDownloading {
 		return
 	}
 	vm.checkingUpdate = true
 	vm.updateErr = ""
+
+	// 正式打包且安装目录可写时，优先使用 MyGo 签名增量更新清单；
+	// 开发态或只读目录平滑回退到 GitHub Releases API 检查。
+	if vm.app.updates != nil && vm.app.updates.enabled() {
+		vm.updateNativeEnabled = true
+		updates := vm.app.updates
+		go func() {
+			st, err := updates.Check(context.Background())
+			vm.app.updateWindow(func() {
+				vm.checkingUpdate = false
+				if err != nil {
+					vm.updateErr = err.Error()
+					return
+				}
+				vm.applyNativeUpdateStatus(st)
+				if st.Available == "" && !st.Installed {
+					vm.updateResult = &updater.CheckResult{
+						CurrentVersion: st.Version,
+						HasUpdate:      false,
+					}
+				}
+			})
+			mygo.RunOnMain(func() { vm.app.refreshTrayMenu() })
+		}()
+		return
+	}
+
 	repo := vm.currentPrefs().UpdateRepo
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -716,6 +810,53 @@ func (vm *viewModel) checkUpdate() {
 			vm.updateResult = res
 		})
 	}()
+}
+
+func (vm *viewModel) installNativeUpdate() {
+	if vm.app == nil || vm.app.updates == nil || vm.updateDownloading || vm.updateInstalled {
+		return
+	}
+	if vm.app.updateProgressReset != nil {
+		vm.app.updateProgressReset()
+	}
+	vm.updateDownloading = true
+	vm.updateDownloaded = 0
+	vm.updateTotal = 0
+	vm.updateErr = ""
+
+	ctx, cancel := context.WithCancel(context.Background())
+	vm.updateCancel = cancel
+	updates := vm.app.updates
+	go func() {
+		defer cancel()
+		st, err := updates.Install(ctx)
+		vm.app.updateWindow(func() {
+			vm.updateCancel = nil
+			vm.updateDownloading = false
+			if err != nil {
+				vm.updateErr = err.Error()
+				return
+			}
+			vm.applyNativeUpdateStatus(st)
+			vm.toastMsg = "更新已安装，点击「重启并应用」生效"
+		})
+		mygo.RunOnMain(func() { vm.app.refreshTrayMenu() })
+	}()
+}
+
+func (vm *viewModel) cancelUpdateDownload() {
+	if vm.updateCancel != nil {
+		vm.updateCancel()
+	}
+}
+
+func (vm *viewModel) restartForUpdate() {
+	if vm.app == nil || vm.app.updates == nil {
+		return
+	}
+	if err := vm.app.updates.Restart(); err != nil {
+		vm.updateErr = err.Error()
+	}
 }
 
 func (vm *viewModel) filteredNodes() []engine.NodeSnapshot {

@@ -55,7 +55,7 @@
 - **单二进制内置 CLI**：无参数运行即启动常驻 GUI；携带子命令时自动发现并通过本机回环 Bearer Token 控制接口操控正在运行的实例，支持终端与 SSH 远程运维，全部命令支持 `--json` 输出。
 - **跨平台系统代理与安全退出**：支持 macOS / Windows 系统代理一键开关、启动连上后自动开启（同步 `autoSetSysProxyOnStartUp`），退出时自动关闭系统代理并安全断开隧道。
 - **无损配置写回**：按 `map[string]json.RawMessage` 原子写回 `config.json`，完整保留账号 token、订阅密码等所有原生字段；本客户端自身外观偏好独立保存在 `flyshadow-bar.prefs.json`。
-- **GitHub Releases 自动更新**：内置版本检测与更新引导，支持应用内检查与 CLI 一键下载最新安装包。
+- **签名增量更新**：基于 MyGo 原生更新器与 Ed25519 签名校验，应用内自动检测并优先下载二进制增量补丁（`.delta`）一键替换重启，大幅减少更新下载体积；同时保留 CLI `update` 检查与下载能力。
 
 ## 自动查找规则
 
@@ -80,7 +80,7 @@
 - **macOS**（`libflyshadow_core_lib.dylib`）：
   1. 可执行文件同级目录、`.app/Contents/Resources`、`.app/Contents/Frameworks` 及当前工作目录。
   2. `~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib`（按语义化版本号降序选取）。
-  3. 自动扫描 `/Applications/FlyShadow.app/Contents/app/common-desktop-*.jar`（及 `~/Applications/` 下对应路径），解压 `darwin-aarch64/libflyshadow_core_lib.dylib` 并缓存至 `~/.FlyShadow/flyshadow-bar-cache/`。
+  3. 自动扫描 `/Applications/FlyShadow.app/Contents/app/common-desktop-*.jar`（及 `~/Applications/` 下对应路径），按当前架构自动解压 `darwin-aarch64/libflyshadow_core_lib.dylib`（Apple Silicon）或 `darwin-x86-64/libflyshadow_core_lib.dylib`（Intel）并缓存至 `~/.FlyShadow/flyshadow-bar-cache/`。
 - **Windows**（`flyshadow_core_lib.dll`）：
   1. 可执行文件同级目录及当前工作目录。
   2. `%USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll`。
@@ -187,16 +187,18 @@ make clean
 
 ## 打包与交叉编译
 
-生产构建会自动注入版本元信息、剥离符号表（`-s -w`），并启用 `mygo` 生产标志（`-X github.com/egoist/mygo.production=1`）与 `-tags mygo_noinspector`。
+项目通过 `go tool mygo build`（由 `go.mod` 固定版本）完成多平台生产构建与签名增量更新打包，自动注入生产标志并剥离符号表。
 
 ```bash
-# 在 macOS 上打包 dist/FlyShadow Bar.app 与 dist/flyshadow-bar-<version>-darwin-arm64.zip
-make app
+# 快速构建当前系统架构应用（跳过 DMG、安装器与公证）
+make build-local
 
-# 零 CGO 交叉编译 Windows amd64（可在 macOS / Linux 上直接执行）
-# 输出 dist/flyshadow-bar.exe 与 dist/flyshadow-bar-<version>-windows-amd64.zip
-make win
+# 构建 macOS 双架构（Apple Silicon arm64 + Intel amd64）应用包与 DMG
+make build-macos
 
-# 本地一键构建双平台产物并生成 dist/checksums.txt
+# 零 CGO 交叉编译 Windows amd64（需本机或 CI 安装 NSIS 以生成安装器）
+make build-win
+
+# 本地一键构建全平台（darwin/arm64、darwin/amd64、windows/amd64）
 make release-local
 ```

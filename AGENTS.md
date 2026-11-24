@@ -18,8 +18,9 @@
 
 ## 架构与构建约束
 
-- **全程零 CGO（`CGO_ENABLED=0`）**：所有构建、测试与交叉编译必须保持 `CGO_ENABLED=0`，不得引入 C 源码、CGO 依赖或需要 C 编译器的库；确保在 macOS / Linux 上可以直接交叉编译 `GOOS=windows GOARCH=amd64`。
-- **纯 Go 原生 GPU UI**：桌面端基于 `github.com/egoist/mygo`（macOS Metal / Windows Direct3D 11）与原生系统托盘实现，严禁引入 Electron、WebView、Node.js 或网页前端构建链。
+- **全程零 CGO（`CGO_ENABLED=0`）**：所有构建、测试与交叉编译必须保持 `CGO_ENABLED=0`，不得引入 C 源码、CGO 依赖或需要 C 编译器的库；确保可跨架构构建 `darwin/arm64`、`darwin/amd64` 与 `windows/amd64`。
+- **纯 Go 原生 GPU UI 与 MyGo 打包**：桌面端基于 `github.com/egoist/mygo`（macOS Metal / Windows Direct3D 11）与原生系统托盘实现，严禁引入 Electron、WebView、Node.js 或网页前端构建链。MyGo CLI 由 `go.mod` 的 `tool` 指令固定，通过 `go tool mygo` 调用，打包与增量更新元数据配置在 `mygo.json`。正式版本号由发版流程从 Git 标签注入 `mygo.json`，仓库内 `mygo.json` 的 `version` 仅用于本地开发构建。
+- **切勿覆盖 `mygo.App.Version()`**：`mygo build` 通过 `-ldflags` 注入当前版本号供 `mygo.Updater` 匹配增量补丁；启动时仅在 `mygo.App.Version()` 为空或 `"0.0.0"` 时才回退调用 `mygo.App.SetVersion`。
 - **单二进制双形态**：入口位于 `cmd/flyshadow-bar/`，无参数或仅带 GUI 标志（`--gui`/`--hidden`/`--config`/`--core-lib`/`--no-connect`/`--no-auto-sysproxy`/`-psn_*`）时启动常驻 GUI；携带子命令时通过本地回环 Bearer Token 控制接口（`~/.FlyShadow/flyshadow-bar.run.json`，权限 `0600`）与运行中实例通信。
 - **包职责划分**：
   - `internal/config`：无损配置加载/保存、节点匹配、13 种官方分流规则与自定义规则 CRUD、客户端独立偏好 `flyshadow-bar.prefs.json`。
@@ -28,9 +29,9 @@
   - `internal/engine`：单进程运行时引擎（隧道热切换、规则热重载不中断隧道、并发测速、1s 流量采样、连接监控、启动自动代理与退出清理）。
   - `internal/control`：仅监听 `127.0.0.1:0` 的随机端口 + 随机 Bearer Token 本地 HTTP 控制服务与客户端。
   - `internal/updater`：GitHub Releases 版本检测、SemVer 比较与按平台挑选产物下载。
-  - `internal/ui`：MyGo 原生主窗口、托盘菜单、图标与视图（`app.go`、`tray.go`、`window.go`、`rules_view.go`、`conns_view.go`）。
-  - `internal/version`：版本、Commit、BuildDate 与仓库元数据（由 `Makefile` `ldflags` 注入）。
-- 常用命令入口统一走 `Makefile`：`make build`、`make run`、`make test`、`make test-live`、`make app`、`make win`、`make release-local`、`make clean`。
+  - `internal/ui`：MyGo 原生主窗口、托盘菜单、图标、增量更新管理器与视图（`app.go`、`tray.go`、`updates.go`、`window.go`、`rules_view.go`、`conns_view.go`）。
+  - `internal/version`：版本、Commit、BuildDate 与仓库元数据（由 `Makefile` `ldflags` / `MYGO_LDFLAGS` 注入）。
+- 常用命令入口统一走 `Makefile`：`make build`、`make run`、`make test`、`make test-live`、`make vet`、`make build-local`、`make build-macos`、`make build-win`、`make release-local`、`make clean`。
 
 ## 核心库 FFI 与配置兼容红线
 
@@ -52,6 +53,7 @@
   ```bash
   CGO_ENABLED=0 go test -v ./...
   CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go vet ./...
+  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go vet ./...
   CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go vet ./...
   ```
 - 涉及锁、并发、生命周期或热切换逻辑的改动，追加运行对应包的 `-race` 测试。
@@ -63,8 +65,8 @@
 仓库通过 [`.github/workflows/release.yml`](.github/workflows/release.yml) 完成自动化发版，**禁止手工直接创建或修改已公开的 Release**：
 
 1. **发版前检查**：
-   - 确认 `main` 分支工作区干净、所有提交已推送至 `origin/main`，且本地单元测试与双平台 `go vet` 全绿。
-   - 确认仓库 Actions Secret 已配置 `DEEPSEEK_API_KEY`（缺失或调用失败会直接中断发版，不生成残缺公告）。
+   - 确认 `main` 分支工作区干净、所有提交已推送至 `origin/main`，且本地单元测试与三平台 `go vet` 全绿。
+   - 确认仓库 Actions Secrets 已配置 `DEEPSEEK_API_KEY`（生成更新日志）与 `MYGO_UPDATER_PRIVATE_KEY`（与 `mygo.json` 中 `updates.publicKey` 配对的 Ed25519 私钥，用于签名更新包与生成增量补丁）；任一缺失会直接中断发版。
    - 确认目标版本号遵循 `vX.Y.Z` 语义化规范且尚未公开发布（workflow 会拒绝覆盖已公开版本）。
 2. **触发发布**：
    ```bash
@@ -73,11 +75,13 @@
    ```
    如需对已有未公开标签重跑，可通过 `workflow_dispatch` 指定 `tag` 触发。
 3. **流水线阶段**：
-   - `prepare`：校验标签格式与 `origin/main` 祖先关系；收集自上一个已公开标签以来的提交记录（排除 `docs/screenshots` 与 `README.md` 纯展示变动），调用 DeepSeek API（`deepseek-v4-flash`）结合 `.github/release-notes.md` 生成面向用户的简体中文更新日志，创建 Draft Release。
-   - `check`：在 `ubuntu-latest` 运行 `CGO_ENABLED=0 go test -v ./...` 及 `darwin/arm64`、`windows/amd64` 双平台 `go vet`。
-   - `build-macos`：在 `macos-latest`（注意：`macos-14` 运行器已退役，勿回退）执行 `make app` 构建 `flyshadow-bar-<tag>-darwin-arm64.zip` 并上传至草稿。
-   - `build-windows`：在 `ubuntu-latest` 执行 `make win` 零 CGO 交叉编译，上传 `flyshadow-bar-<tag>-windows-amd64.zip` 与 `flyshadow-bar-<tag>-windows-amd64.exe` 至草稿。
-   - `publish`：下载草稿内全部 3 个产物做完整性校验，生成并上传 `checksums.txt`，最后取消草稿并设为 `latest`。
+   - `prepare`：校验标签格式与 `origin/main` 祖先关系；收集自上一个已公开标签以来的提交记录（排除 `docs/screenshots`、`README.md` 与 `AGENTS.md`），调用 DeepSeek API（`deepseek-v4-flash`）结合 `.github/release-notes.md` 生成面向用户的简体中文更新日志，创建 Draft Release。
+   - `check`：在 `ubuntu-latest` 运行 `CGO_ENABLED=0 go test -v ./...` 及 `darwin/arm64`、`darwin/amd64`、`windows/amd64` 三目标 `go vet`。
+   - `build` 矩阵：
+     - `macos-latest`（注意：`macos-14` 运行器已退役，勿回退）执行 `go tool mygo build -platform darwin/arm64,darwin/amd64 -skip-notarize`，生成 Apple Silicon / Intel 双架构 `.dmg`、签名 `.tar.gz`、最近 3 个版本的 `.delta` 增量补丁与 `update-darwin-{arm64,amd64}.json`；
+     - `ubuntu-latest` 安装 `nsis` 后执行 `go tool mygo build -platform windows/amd64`，生成 Windows `setup` 安装器、签名 `.tar.gz`、`.delta` 增量补丁与 `update-windows-amd64.json`；
+     - 先上传安装包、归档与增量补丁，再上传 `update-*.json` 更新清单。
+   - `publish`：下载草稿内全部产物，校验 3 份 `update-*.json`、2 份 macOS `.dmg`、Windows `setup` 安装器以及清单引用的全部归档与 `.delta` 文件大小和签名，输出完整包与增量包体积统计，生成并上传 `checksums.txt`，最后取消草稿并设为 `latest`。
    - `cleanup`：若上述任一阶段失败或被取消，自动删除未公开草稿（保留标签便于修复后重试）。
 4. **发布后核验**：
-   - 使用 `gh run watch` 或 `gh release view vX.Y.Z` 确认状态为正式公开且 4 个资产（macOS zip、Windows zip、Windows exe、`checksums.txt`）齐全。
+   - 使用 `gh run watch` 或 `gh release view vX.Y.Z` 确认状态为正式公开，且 `darwin-arm64`、`darwin-amd64`、`windows-amd64` 三平台的安装包、签名归档、增量补丁（从第二个签名版本起自动生成）、`update-*.json` 与 `checksums.txt` 齐全。

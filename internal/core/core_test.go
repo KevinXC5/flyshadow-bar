@@ -72,6 +72,17 @@ func TestParseProxyMode(t *testing.T) {
 	}
 }
 
+func TestDarwinJarEntries(t *testing.T) {
+	arm := darwinJarEntries("arm64")
+	if len(arm) == 0 || arm[0] != DarwinJarEntry {
+		t.Fatalf("darwinJarEntries(arm64) = %v, want %q", arm, DarwinJarEntry)
+	}
+	amd := darwinJarEntries("amd64")
+	if len(amd) == 0 || amd[0] != DarwinAMD64JarEntry {
+		t.Fatalf("darwinJarEntries(amd64) = %v, want %q", amd, DarwinAMD64JarEntry)
+	}
+}
+
 // TestLiveCoreSmoke 仅在显式设置 FLYSHADOW_LIVE_TEST=1 时运行，使用空闲随机高端口，绝不干扰 7890。
 // 严格禁止输出任何节点密码、host 或用户敏感信息。
 func TestLiveCoreSmoke(t *testing.T) {

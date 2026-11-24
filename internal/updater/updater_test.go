@@ -39,10 +39,15 @@ func TestCompareVersions(t *testing.T) {
 
 func TestSelectAsset(t *testing.T) {
 	assets := []githubAsset{
-		{Name: "flyshadow-bar-0.2.0-darwin-arm64.dmg", BrowserDownloadURL: "https://example.com/darwin-arm64.dmg"},
+		{Name: "flyshadow-bar-0.2.0-arm64.dmg", BrowserDownloadURL: "https://example.com/darwin-arm64.dmg"},
+		{Name: "flyshadow-bar-0.2.0-amd64.dmg", BrowserDownloadURL: "https://example.com/darwin-amd64.dmg"},
+		{Name: "flyshadow-bar-0.2.0-darwin-arm64.tar.gz", BrowserDownloadURL: "https://example.com/darwin-arm64.tar.gz"},
+		{Name: "flyshadow-bar-0.1.0-to-0.2.0-darwin-arm64.delta", BrowserDownloadURL: "https://example.com/darwin-arm64.delta"},
+		{Name: "update-darwin-arm64.json", BrowserDownloadURL: "https://example.com/update-darwin-arm64.json"},
 		{Name: "flyshadow-bar-0.2.0-darwin-arm64.zip", BrowserDownloadURL: "https://example.com/darwin-arm64.zip"},
 		{Name: "flyshadow-bar-0.2.0-darwin-arm64.zip.sha256", BrowserDownloadURL: "https://example.com/darwin-arm64.zip.sha256"},
 		{Name: "flyshadow-bar-0.2.0-darwin-universal.zip", BrowserDownloadURL: "https://example.com/darwin-universal.zip"},
+		{Name: "flyshadow-bar-setup-0.2.0-amd64.exe", BrowserDownloadURL: "https://example.com/setup-amd64.exe"},
 		{Name: "flyshadow-bar-0.2.0-windows-amd64.exe", BrowserDownloadURL: "https://example.com/windows-amd64.exe"},
 		{Name: "flyshadow-bar-0.2.0-windows-amd64.zip", BrowserDownloadURL: "https://example.com/windows-amd64.zip"},
 		{Name: "flyshadow-bar-0.2.0-linux-amd64.tar.gz", BrowserDownloadURL: "https://example.com/linux-amd64.tar.gz"},
@@ -53,9 +58,9 @@ func TestSelectAsset(t *testing.T) {
 		goarch string
 		want   string
 	}{
-		{goos: "darwin", goarch: "arm64", want: "flyshadow-bar-0.2.0-darwin-arm64.zip"},
-		{goos: "darwin", goarch: "amd64", want: "flyshadow-bar-0.2.0-darwin-universal.zip"},
-		{goos: "windows", goarch: "amd64", want: "flyshadow-bar-0.2.0-windows-amd64.zip"},
+		{goos: "darwin", goarch: "arm64", want: "flyshadow-bar-0.2.0-arm64.dmg"},
+		{goos: "darwin", goarch: "amd64", want: "flyshadow-bar-0.2.0-amd64.dmg"},
+		{goos: "windows", goarch: "amd64", want: "flyshadow-bar-setup-0.2.0-amd64.exe"},
 		{goos: "linux", goarch: "amd64", want: "flyshadow-bar-0.2.0-linux-amd64.tar.gz"},
 	}
 
@@ -69,12 +74,14 @@ func TestSelectAsset(t *testing.T) {
 		}
 	}
 
-	// 确保 darwin 文件名不会被误判为 Windows 资产。
+	// 确保 darwin 附件及增量/清单文件不会被误判为 Windows 资产。
 	onlyDarwin := []githubAsset{
-		{Name: "flyshadow-bar-0.2.0-darwin-amd64.zip", BrowserDownloadURL: "https://example.com/darwin-amd64.zip"},
+		{Name: "flyshadow-bar-0.2.0-amd64.dmg", BrowserDownloadURL: "https://example.com/darwin-amd64.dmg"},
+		{Name: "flyshadow-bar-0.1.0-to-0.2.0-windows-amd64.delta", BrowserDownloadURL: "https://example.com/win.delta"},
+		{Name: "update-windows-amd64.json", BrowserDownloadURL: "https://example.com/update-windows-amd64.json"},
 	}
 	if _, ok := selectAsset(onlyDarwin, "windows", "amd64"); ok {
-		t.Fatalf("darwin 附件不应匹配 windows 平台")
+		t.Fatalf("darwin/delta/manifest 附件不应匹配 windows 安装包")
 	}
 }
 

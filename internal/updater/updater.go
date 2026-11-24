@@ -403,7 +403,7 @@ func scoreAsset(name, goos, goarch string) int {
 	}
 
 	tokens := tokenizeAssetName(lower)
-	if !matchesOS(tokens, goos) {
+	if !matchesOS(lower, tokens, goos) {
 		return 0
 	}
 
@@ -422,12 +422,15 @@ func scoreAsset(name, goos, goarch string) int {
 	}
 
 	switch {
+	case strings.HasSuffix(lower, ".dmg"), strings.HasSuffix(lower, ".pkg"):
+		score += 24
 	case strings.HasSuffix(lower, ".zip"):
 		score += 20
+	case strings.HasSuffix(lower, ".msi"), (strings.HasSuffix(lower, ".exe") && strings.Contains(lower, "setup")):
+		score += 24
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
 		score += 12
-	case strings.HasSuffix(lower, ".dmg"), strings.HasSuffix(lower, ".pkg"),
-		strings.HasSuffix(lower, ".msi"), strings.HasSuffix(lower, ".exe"):
+	case strings.HasSuffix(lower, ".exe"):
 		score += 8
 	default:
 		score += 1
@@ -437,10 +440,10 @@ func scoreAsset(name, goos, goarch string) int {
 }
 
 func isAuxAsset(lowerName string) bool {
-	if strings.Contains(lowerName, "checksum") {
+	if strings.Contains(lowerName, "checksum") || strings.HasPrefix(lowerName, "update-") {
 		return true
 	}
-	auxSuffixes := []string{".sha256", ".sha512", ".md5", ".sig", ".asc", ".txt", ".json", ".sbom"}
+	auxSuffixes := []string{".sha256", ".sha512", ".md5", ".sig", ".asc", ".txt", ".json", ".sbom", ".delta"}
 	for _, suffix := range auxSuffixes {
 		if strings.HasSuffix(lowerName, suffix) {
 			return true
@@ -469,13 +472,26 @@ func hasAnyToken(tokens map[string]struct{}, candidates ...string) bool {
 	return false
 }
 
-func matchesOS(tokens map[string]struct{}, goos string) bool {
+func matchesOS(lowerName string, tokens map[string]struct{}, goos string) bool {
 	switch goos {
 	case "darwin":
-		return hasAnyToken(tokens, "darwin", "macos", "osx")
+		if hasAnyToken(tokens, "windows", "win", "win64", "win32", "linux") {
+			return false
+		}
+		return hasAnyToken(tokens, "darwin", "macos", "osx") ||
+			strings.HasSuffix(lowerName, ".dmg") ||
+			strings.HasSuffix(lowerName, ".pkg")
 	case "windows":
-		return hasAnyToken(tokens, "windows", "win", "win64", "win32")
+		if hasAnyToken(tokens, "darwin", "macos", "osx", "linux") {
+			return false
+		}
+		return hasAnyToken(tokens, "windows", "win", "win64", "win32") ||
+			strings.HasSuffix(lowerName, ".exe") ||
+			strings.HasSuffix(lowerName, ".msi")
 	case "linux":
+		if hasAnyToken(tokens, "darwin", "macos", "osx", "windows", "win", "win64", "win32") {
+			return false
+		}
 		return hasAnyToken(tokens, "linux")
 	default:
 		return hasAnyToken(tokens, strings.ToLower(goos))

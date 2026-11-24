@@ -16,13 +16,23 @@ import (
 )
 
 const (
-	DarwinLibName   = "libflyshadow_core_lib.dylib"
-	WindowsLibName  = "flyshadow_core_lib.dll"
-	GeoIPFileName   = "Country-only-cn-private.mmdb"
-	GeoIPJarEntry   = "geoip/Country-only-cn-private.mmdb"
-	DarwinJarEntry  = "darwin-aarch64/libflyshadow_core_lib.dylib"
-	WindowsJarEntry = "win32-x86-64/flyshadow_core_lib.dll"
+	DarwinLibName       = "libflyshadow_core_lib.dylib"
+	WindowsLibName      = "flyshadow_core_lib.dll"
+	GeoIPFileName       = "Country-only-cn-private.mmdb"
+	GeoIPJarEntry       = "geoip/Country-only-cn-private.mmdb"
+	DarwinJarEntry      = "darwin-aarch64/libflyshadow_core_lib.dylib"
+	DarwinAMD64JarEntry = "darwin-x86-64/libflyshadow_core_lib.dylib"
+	WindowsJarEntry     = "win32-x86-64/flyshadow_core_lib.dll"
 )
+
+func darwinJarEntries(goarch string) []string {
+	switch goarch {
+	case "amd64":
+		return []string{DarwinAMD64JarEntry, "darwin-x86_64/" + DarwinLibName}
+	default:
+		return []string{DarwinJarEntry}
+	}
+}
 
 // LocateCoreLib 按平台优先级自动查找 FlyShadow 原生动态库，必要时从官方 JAR 解压缓存。
 func LocateCoreLib() (string, error) {
@@ -95,10 +105,13 @@ func locateDarwinCoreLib() (string, error) {
 		}
 	}
 
-	// 3. 从 /Applications/FlyShadow.app/Contents/app/common-desktop-*.jar 自动解压
+	// 3. 从 /Applications/FlyShadow.app/Contents/app/common-desktop-*.jar 自动解压（按当前架构选择）
+	cacheFileName := fmt.Sprintf("darwin-%s-%s", runtime.GOARCH, DarwinLibName)
 	for _, jarPath := range findOfficialJars() {
-		if extracted, err := extractFromJarCached(jarPath, DarwinJarEntry, DarwinLibName); err == nil {
-			return extracted, nil
+		for _, entry := range darwinJarEntries(runtime.GOARCH) {
+			if extracted, err := extractFromJarCached(jarPath, entry, cacheFileName); err == nil {
+				return extracted, nil
+			}
 		}
 	}
 
