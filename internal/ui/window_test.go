@@ -91,12 +91,17 @@ func TestMainViewRendersCleanly(t *testing.T) {
 		t.Fatalf("onlyStarred filter did not take effect: onlyStarred=%v, texts=%v", vm.onlyStarred, tt.Texts())
 	}
 
-	// 验证点击流量卡上的订阅密码图标可打开模态弹窗，点击取消可关闭
+	// 验证点击流量卡上的订阅密码图标可打开模态弹窗，面板严格居中且左右对称，点击取消可关闭
 	if err := tt.Click("配置订阅密码"); err != nil {
 		t.Fatalf("click 配置订阅密码: %v", err)
 	}
 	if !vm.subModalOpen || !tt.HasText("更换订阅密码") || !tt.HasText("保存并同步") {
 		t.Fatalf("subscribe password modal did not open cleanly: open=%v texts=%v", vm.subModalOpen, tt.Texts())
+	}
+	if dlg, ok := tt.AccessByRole(ui.RoleDialog, ""); !ok {
+		t.Fatalf("subscribe modal dialog role not found")
+	} else {
+		assertDialogCentered(t, "subscribe-modal", dlg.Bounds, 500, 780)
 	}
 	if err := tt.Click("取消"); err != nil {
 		t.Fatalf("click 取消: %v", err)
@@ -459,6 +464,24 @@ func TestActiveRulesModalBrowseAndFilter(t *testing.T) {
 		t.Fatalf("active rules modal did not render expected rules: open=%v texts=%v", vm.activeRulesModal.open, tt.Texts())
 	}
 
+	// 验证单层弹窗面板在窗口内严格居中，且内部统计卡在面板内左右边距完全对称（无双层框挤压偏移）
+	dlg, ok := tt.AccessByRole(ui.RoleDialog, "")
+	if !ok {
+		t.Fatalf("active rules modal dialog role not found")
+	}
+	assertDialogCentered(t, "active-rules-modal", dlg.Bounds, 500, 820)
+	statAll, okAll := tt.Find("全部规则")
+	statReject, okReject := tt.Find("拒绝")
+	if !okAll || !okReject {
+		t.Fatalf("expected stat cards bounds, got okAll=%v okReject=%v", okAll, okReject)
+	}
+	leftInset := statAll.X - dlg.Bounds.X
+	rightInset := (dlg.Bounds.X + dlg.Bounds.W) - (statReject.X + statReject.W)
+	if absFloat32(leftInset-rightInset) > 1.5 || leftInset < 12 || leftInset > 16 {
+		t.Fatalf("active rules modal inner insets not symmetric: left=%.1f right=%.1f (dlg=%+v all=%+v reject=%+v)",
+			leftInset, rightInset, dlg.Bounds, statAll, statReject)
+	}
+
 	// 点击统计卡「拒绝」应只显示拒绝规则
 	if err := tt.Click("拒绝"); err != nil {
 		t.Fatalf("click 拒绝 stat card: %v", err)
@@ -490,4 +513,28 @@ func TestActiveRulesModalBrowseAndFilter(t *testing.T) {
 	if vm.activeRulesModal.open {
 		t.Fatalf("active rules modal did not close")
 	}
+}
+
+func assertDialogCentered(t *testing.T, name string, bounds ui.Rect, winW, winH float32) {
+	t.Helper()
+	if bounds.W <= 0 || bounds.H <= 0 {
+		t.Fatalf("%s invalid bounds: %+v", name, bounds)
+	}
+	leftMargin := bounds.X
+	rightMargin := winW - (bounds.X + bounds.W)
+	topMargin := bounds.Y
+	bottomMargin := winH - (bounds.Y + bounds.H)
+	if absFloat32(leftMargin-rightMargin) > 1.5 {
+		t.Fatalf("%s not horizontally centered: left=%.1f right=%.1f bounds=%+v", name, leftMargin, rightMargin, bounds)
+	}
+	if absFloat32(topMargin-bottomMargin) > 1.5 {
+		t.Fatalf("%s not vertically centered: top=%.1f bottom=%.1f bounds=%+v", name, topMargin, bottomMargin, bounds)
+	}
+}
+
+func absFloat32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

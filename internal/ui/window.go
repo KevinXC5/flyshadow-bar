@@ -596,89 +596,99 @@ func (vm *viewModel) renderSubscribeModal(c *ui.Context, p palette) {
 	if !vm.subModalOpen {
 		return
 	}
-	modal := ui.Modal(c.Key("sub-password-modal"), &vm.subModalOpen, func() {
-		ui.Column(c).Width(356).Padding(16).Gap(12).Radius(13).
-			Background(p.card).Border(1, p.borderStrong).Children(func() {
-			// 标题栏
-			ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
-				ui.Box(c).Size(24, 24).Radius(7).Background(p.accentSoft).Center().Children(func() {
-					ui.Icon(c, svgKey).Size(13, 13).TextColor(p.accent)
-				})
-				title := "配置订阅密码"
-				if vm.snap.HasCloudAuth {
-					title = "更换订阅密码"
-				}
-				ui.Text(c, title).FontSize(14).Bold().TextColor(p.text)
-				ui.Spacer(c)
-				closeBtn := ui.Box(c.Key("btn-sub-modal-close")).Size(24, 24).Radius(6).Center().
-					Cursor(ui.CursorPointer).Label("关闭").Tooltip("关闭")
-				if closeBtn.Hovered() {
-					closeBtn.Background(p.pillBg)
-				}
-				closeBtn.Children(func() {
-					ui.Icon(c, svgClose).Size(13, 13).TextColor(p.textMuted)
-				})
-				if !vm.subSaving && closeBtn.Clicked() {
-					vm.closeSubscribeModal()
-				}
+	winW, winH := c.Size()
+	panelW := min(float32(368), max(float32(300), winW-36))
+	shadowAlpha := float32(0.22)
+	backdropAlpha := float32(0.40)
+	if c.Theme().Dark {
+		shadowAlpha = 0.45
+		backdropAlpha = 0.54
+	}
+	modal := ui.DialogBase(c.Key("sub-password-modal"), &vm.subModalOpen, func(backdrop, panel ui.Element) {
+		backdrop.Background(ui.RGBA(0, 0, 0, backdropAlpha))
+		panel.Width(panelW).MaxHeight(max(float32(260), winH-48)).Padding(16).Gap(12).Radius(13).
+			Background(p.card).Border(1, p.borderStrong).
+			Shadow(0, 10, 30, 0, ui.RGBA(0, 0, 0, shadowAlpha))
+
+		// 标题栏
+		ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
+			ui.Box(c).Size(24, 24).Radius(7).Background(p.accentSoft).Center().Children(func() {
+				ui.Icon(c, svgKey).Size(13, 13).TextColor(p.accent)
 			})
-
-			ui.Text(c, "输入订阅密码后将自动校验，并同步节点、套餐流量与云端规则。").
-				FontSize(11.5).TextColor(p.textMuted).Wrap()
-
-			// 密码输入行（支持掩码切换与回车直接提交）
-			ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
-				inp := ui.TextInput(c.Key("sub-pw-input"), &vm.subPasswordDraft).
-					Grow(1).Placeholder("请输入订阅密码").AutoFocus()
-				if !vm.subPasswordShow {
-					inp.Password()
-				}
-				if inp.Submitted() && !vm.subSaving {
-					vm.submitSubscribePassword()
-				}
-
-				eyeIcon := svgEye
-				eyeTip := "显示密码"
-				if vm.subPasswordShow {
-					eyeIcon = svgEyeOff
-					eyeTip = "隐藏密码"
-				}
-				eyeBtn := ui.Box(c.Key("btn-sub-pw-eye")).Size(30, 30).Radius(7).Center().
-					Background(p.cardElevated).Border(1, p.border).Cursor(ui.CursorPointer).
-					Label(eyeTip).Tooltip(eyeTip)
-				if eyeBtn.Hovered() {
-					eyeBtn.Background(p.cardHover)
-				}
-				eyeBtn.Children(func() {
-					ui.Icon(c, eyeIcon).Size(14, 14).TextColor(p.textSecondary)
-				})
-				if eyeBtn.Clicked() {
-					vm.subPasswordShow = !vm.subPasswordShow
-				}
+			title := "配置订阅密码"
+			if vm.snap.HasCloudAuth {
+				title = "更换订阅密码"
+			}
+			ui.Text(c, title).FontSize(14).Bold().TextColor(p.text)
+			ui.Spacer(c)
+			closeBtn := ui.Box(c.Key("btn-sub-modal-close")).Size(24, 24).Radius(6).Center().
+				Cursor(ui.CursorPointer).Label("关闭").Tooltip("关闭")
+			if closeBtn.Hovered() {
+				closeBtn.Background(p.pillBg)
+			}
+			closeBtn.Children(func() {
+				ui.Icon(c, svgClose).Size(13, 13).TextColor(p.textMuted)
 			})
+			if !vm.subSaving && closeBtn.Clicked() {
+				vm.closeSubscribeModal()
+			}
+		})
 
-			if vm.subModalErr != "" {
-				ui.Row(c).Padding(6, 9).Radius(7).Background(p.dangerSoft).Children(func() {
-					ui.Text(c, vm.subModalErr).FontSize(11).TextColor(p.danger).Wrap()
-				})
+		ui.Text(c, "输入订阅密码后将自动校验，并同步节点、套餐流量与云端规则。").
+			FontSize(11.5).TextColor(p.textMuted).Wrap()
+
+		// 密码输入行（支持掩码切换与回车直接提交）
+		ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
+			inp := ui.TextInput(c.Key("sub-pw-input"), &vm.subPasswordDraft).
+				Grow(1).Placeholder("请输入订阅密码").AutoFocus()
+			if !vm.subPasswordShow {
+				inp.Password()
+			}
+			if inp.Submitted() && !vm.subSaving {
+				vm.submitSubscribePassword()
 			}
 
-			// 底部操作按钮
-			ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-				ui.Spacer(c)
-				if ui.Button(c.Key("btn-sub-cancel"), "取消").Padding(6, 14).Radius(7).
-					Disabled(vm.subSaving).Clicked() {
-					vm.closeSubscribeModal()
-				}
-				saveLabel := "保存并同步"
-				if vm.subSaving {
-					saveLabel = "校验中…"
-				}
-				if ui.PrimaryButton(c.Key("btn-sub-save"), saveLabel).Padding(6, 14).Radius(7).
-					Disabled(vm.subSaving || strings.TrimSpace(vm.subPasswordDraft) == "").Clicked() {
-					vm.submitSubscribePassword()
-				}
+			eyeIcon := svgEye
+			eyeTip := "显示密码"
+			if vm.subPasswordShow {
+				eyeIcon = svgEyeOff
+				eyeTip = "隐藏密码"
+			}
+			eyeBtn := ui.Box(c.Key("btn-sub-pw-eye")).Size(30, 30).Radius(7).Center().
+				Background(p.cardElevated).Border(1, p.border).Cursor(ui.CursorPointer).
+				Label(eyeTip).Tooltip(eyeTip)
+			if eyeBtn.Hovered() {
+				eyeBtn.Background(p.cardHover)
+			}
+			eyeBtn.Children(func() {
+				ui.Icon(c, eyeIcon).Size(14, 14).TextColor(p.textSecondary)
 			})
+			if eyeBtn.Clicked() {
+				vm.subPasswordShow = !vm.subPasswordShow
+			}
+		})
+
+		if vm.subModalErr != "" {
+			ui.Row(c).Padding(6, 9).Radius(7).Background(p.dangerSoft).Children(func() {
+				ui.Text(c, vm.subModalErr).FontSize(11).TextColor(p.danger).Wrap()
+			})
+		}
+
+		// 底部操作按钮
+		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Spacer(c)
+			if ui.Button(c.Key("btn-sub-cancel"), "取消").Padding(6, 14).Radius(7).
+				Disabled(vm.subSaving).Clicked() {
+				vm.closeSubscribeModal()
+			}
+			saveLabel := "保存并同步"
+			if vm.subSaving {
+				saveLabel = "校验中…"
+			}
+			if ui.PrimaryButton(c.Key("btn-sub-save"), saveLabel).Padding(6, 14).Radius(7).
+				Disabled(vm.subSaving || strings.TrimSpace(vm.subPasswordDraft) == "").Clicked() {
+				vm.submitSubscribePassword()
+			}
 		})
 	})
 	if modal.Dismissed() {

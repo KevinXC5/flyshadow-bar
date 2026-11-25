@@ -213,109 +213,120 @@ func (vm *viewModel) renderActiveRulesModal(c *ui.Context, p palette) {
 		}
 	}
 
-	modal := ui.Modal(c.Key("active-rules-modal"), &st.open, func() {
-		ui.Column(c).Width(448).Height(576).Padding(14).Gap(9).Radius(13).
-			Background(p.card).Border(1, p.borderStrong).Children(func() {
+	winW, winH := c.Size()
+	panelW := min(float32(464), max(float32(340), winW-28))
+	panelH := min(float32(620), max(float32(420), winH-56))
+	shadowAlpha := float32(0.22)
+	backdropAlpha := float32(0.40)
+	if c.Theme().Dark {
+		shadowAlpha = 0.45
+		backdropAlpha = 0.54
+	}
 
-			// 1. 弹窗标题栏
-			ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
-				ui.Box(c).Size(24, 24).Radius(7).Background(p.accentSoft).Center().Children(func() {
-					ui.Icon(c, svgLayers).Size(13, 13).TextColor(p.accent)
-				})
-				ui.Text(c, "生效分流规则").FontSize(14).Bold().TextColor(p.text).NoWrap()
-				renderMiniTag(c, fmt.Sprintf("%d 条", len(st.entries)), p.accent, p.accentSoft)
-				if vm.snap.GeoIPLoaded {
-					renderMiniTag(c, "GeoIP 已加载", p.success, p.successSoft)
-				}
-				ui.Spacer(c)
-				closeBtn := ui.Box(c.Key("btn-active-rules-close")).Size(24, 24).Radius(6).Center().
-					Cursor(ui.CursorPointer).Label("关闭生效规则").Tooltip("关闭")
-				if closeBtn.Hovered() {
-					closeBtn.Background(p.pillBg)
-				}
-				closeBtn.Children(func() {
-					ui.Icon(c, svgClose).Size(13, 13).TextColor(p.textMuted)
-				})
-				if closeBtn.Clicked() {
-					vm.closeActiveRulesModal()
-				}
+	modal := ui.DialogBase(c.Key("active-rules-modal"), &st.open, func(backdrop, panel ui.Element) {
+		backdrop.Background(ui.RGBA(0, 0, 0, backdropAlpha))
+		panel.Width(panelW).Height(panelH).Padding(14).Gap(9).Radius(13).
+			Background(p.card).Border(1, p.borderStrong).
+			Shadow(0, 10, 30, 0, ui.RGBA(0, 0, 0, shadowAlpha))
+
+		// 1. 弹窗标题栏
+		ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
+			ui.Box(c).Size(24, 24).Radius(7).Background(p.accentSoft).Center().Children(func() {
+				ui.Icon(c, svgLayers).Size(13, 13).TextColor(p.accent)
 			})
-
-			// 2. 四格可点击统计概览卡（展示各动作占比，同时作为快捷动作筛选）
-			ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
-				vm.renderActiveRuleStatCard(c, p, "stat-all", "全部规则", len(st.entries), -1, p.text, p.accentSoft, p.borderStrong)
-				vm.renderActiveRuleStatCard(c, p, "stat-proxy", "代理", st.proxyCount, 2, p.accent, p.accentSoft, p.borderStrong)
-				vm.renderActiveRuleStatCard(c, p, "stat-direct", "直连", st.directCount, 0, p.success, p.successSoft, p.success)
-				vm.renderActiveRuleStatCard(c, p, "stat-reject", "拒绝", st.rejectCount, 1, p.danger, p.dangerSoft, p.danger)
-			})
-
-			// 3. 搜索框 + 来源筛选药丸
-			ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
-				ui.SearchField(c.Key("ar-search"), &st.searchQuery).Grow(1).Placeholder("搜索域名、IP/CIDR、进程或分组…")
-			})
-
-			// 来源分布筛选行
-			ui.Row(c).AlignItems(ui.Center).Gap(5).Children(func() {
-				ui.Text(c, "来源").FontSize(10.5).TextColor(p.textMuted).NoWrap()
-				vm.renderActiveRuleSourceChip(c, p, "", fmt.Sprintf("全部 (%d)", len(st.entries)))
-				vm.renderActiveRuleSourceChip(c, p, string(config.RuleSourceCustom), fmt.Sprintf("自定义 (%d)", st.customCount))
-				vm.renderActiveRuleSourceChip(c, p, string(config.RuleSourceSubscribe), fmt.Sprintf("订阅内置 (%d)", st.subscribeCount))
-			})
-
-			// 匹配类型分布横向筛选条（只列出当前规则中实际存在的类型）
-			if len(st.matchBuckets) > 0 {
-				ui.Row(c).AlignItems(ui.Center).Gap(5).Children(func() {
-					ui.Text(c, "类型").FontSize(10.5).TextColor(p.textMuted).NoWrap()
-					ui.ScrollHorizontal(c.Key("ar-match-scroll")).Grow(1).MinWidth(0).Children(func() {
-						ui.Row(c).AlignItems(ui.Center).Gap(4).Padding(0, 2, 2, 0).Children(func() {
-							vm.renderActiveRuleMatchChip(c, p, -1, "全部")
-							for _, b := range st.matchBuckets {
-								vm.renderActiveRuleMatchChip(c, p, b.matching, fmt.Sprintf("%s %d", b.label, b.count))
-							}
-						})
-					})
-				})
+			ui.Text(c, "生效分流规则").FontSize(14).Bold().TextColor(p.text).NoWrap()
+			renderMiniTag(c, fmt.Sprintf("%d 条", len(st.entries)), p.accent, p.accentSoft)
+			if vm.snap.GeoIPLoaded {
+				renderMiniTag(c, "GeoIP 已加载", p.success, p.successSoft)
 			}
-
-			// 4. 命中顺序与筛选摘要行
-			ui.Row(c).AlignItems(ui.Center).Gap(6).Padding(0, 2).Children(func() {
-				summary := fmt.Sprintf("共 %d 条 · 按命中优先级从高到低", len(st.entries))
-				if st.hasActiveFilter() {
-					summary = fmt.Sprintf("匹配 %d / %d 条", len(filtered), len(st.entries))
-				}
-				ui.Text(c, summary).FontSize(10.5).TextColor(p.textMuted).NoWrap()
-				ui.Spacer(c)
-				if st.hasActiveFilter() {
-					resetBtn := ui.Row(c.Key("ar-reset-filter")).Padding(1, 5).Radius(4).
-						Cursor(ui.CursorPointer).Label("重置筛选").Children(func() {
-						ui.Text(c, "重置筛选").FontSize(10.5).Bold().TextColor(p.accent).NoWrap()
-					})
-					if resetBtn.Hovered() {
-						resetBtn.Background(p.accentSoft)
-					}
-					if resetBtn.Clicked() {
-						st.resetFilters()
-					}
-				} else {
-					ui.Text(c, "自定义优先于订阅").FontSize(10.5).TextColor(p.textMuted).NoWrap()
-				}
+			ui.Spacer(c)
+			closeBtn := ui.Box(c.Key("btn-active-rules-close")).Size(24, 24).Radius(6).Center().
+				Cursor(ui.CursorPointer).Label("关闭生效规则").Tooltip("关闭")
+			if closeBtn.Hovered() {
+				closeBtn.Background(p.pillBg)
+			}
+			closeBtn.Children(func() {
+				ui.Icon(c, svgClose).Size(13, 13).TextColor(p.textMuted)
 			})
-
-			// 5. 虚拟化规则卡片列表（单屏只渲染可见行，支持万级规则流畅滚动）
-			if len(filtered) == 0 {
-				ui.Column(c).Grow(1).Center().Radius(10).Background(p.cardElevated).Border(1, p.border).Children(func() {
-					emptyText := "暂无生效规则"
-					if len(st.entries) > 0 {
-						emptyText = "没有符合当前筛选条件的规则"
-					}
-					ui.Text(c, emptyText).FontSize(12).TextColor(p.textMuted)
-				})
-			} else {
-				ui.List(c.Key("active-rules-list"), &st.listState, len(filtered), func(i int) {
-					vm.renderActiveRuleRow(c, p, filtered[i])
-				}).Grow(1).MinHeight(0).Margin(0, -10, 0, 0)
+			if closeBtn.Clicked() {
+				vm.closeActiveRulesModal()
 			}
 		})
+
+		// 2. 四格可点击统计概览卡（展示各动作占比，同时作为快捷动作筛选）
+		ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
+			vm.renderActiveRuleStatCard(c, p, "stat-all", "全部规则", len(st.entries), -1, p.text, p.accentSoft, p.borderStrong)
+			vm.renderActiveRuleStatCard(c, p, "stat-proxy", "代理", st.proxyCount, 2, p.accent, p.accentSoft, p.borderStrong)
+			vm.renderActiveRuleStatCard(c, p, "stat-direct", "直连", st.directCount, 0, p.success, p.successSoft, p.success)
+			vm.renderActiveRuleStatCard(c, p, "stat-reject", "拒绝", st.rejectCount, 1, p.danger, p.dangerSoft, p.danger)
+		})
+
+		// 3. 搜索框 + 来源筛选药丸
+		ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
+			ui.SearchField(c.Key("ar-search"), &st.searchQuery).Grow(1).Placeholder("搜索域名、IP/CIDR、进程或分组…")
+		})
+
+		// 来源分布筛选行
+		ui.Row(c).AlignItems(ui.Center).Gap(5).Children(func() {
+			ui.Text(c, "来源").FontSize(10.5).TextColor(p.textMuted).NoWrap()
+			vm.renderActiveRuleSourceChip(c, p, "", fmt.Sprintf("全部 (%d)", len(st.entries)))
+			vm.renderActiveRuleSourceChip(c, p, string(config.RuleSourceCustom), fmt.Sprintf("自定义 (%d)", st.customCount))
+			vm.renderActiveRuleSourceChip(c, p, string(config.RuleSourceSubscribe), fmt.Sprintf("订阅内置 (%d)", st.subscribeCount))
+		})
+
+		// 匹配类型分布横向筛选条（只列出当前规则中实际存在的类型）
+		if len(st.matchBuckets) > 0 {
+			ui.Row(c).AlignItems(ui.Center).Gap(5).Children(func() {
+				ui.Text(c, "类型").FontSize(10.5).TextColor(p.textMuted).NoWrap()
+				ui.ScrollHorizontal(c.Key("ar-match-scroll")).Grow(1).MinWidth(0).Children(func() {
+					ui.Row(c).AlignItems(ui.Center).Gap(4).Padding(0, 2, 2, 0).Children(func() {
+						vm.renderActiveRuleMatchChip(c, p, -1, "全部")
+						for _, b := range st.matchBuckets {
+							vm.renderActiveRuleMatchChip(c, p, b.matching, fmt.Sprintf("%s %d", b.label, b.count))
+						}
+					})
+				})
+			})
+		}
+
+		// 4. 命中顺序与筛选摘要行
+		ui.Row(c).AlignItems(ui.Center).Gap(6).Padding(0, 2).Children(func() {
+			summary := fmt.Sprintf("共 %d 条 · 按命中优先级从高到低", len(st.entries))
+			if st.hasActiveFilter() {
+				summary = fmt.Sprintf("匹配 %d / %d 条", len(filtered), len(st.entries))
+			}
+			ui.Text(c, summary).FontSize(10.5).TextColor(p.textMuted).NoWrap()
+			ui.Spacer(c)
+			if st.hasActiveFilter() {
+				resetBtn := ui.Row(c.Key("ar-reset-filter")).Padding(1, 5).Radius(4).
+					Cursor(ui.CursorPointer).Label("重置筛选").Children(func() {
+					ui.Text(c, "重置筛选").FontSize(10.5).Bold().TextColor(p.accent).NoWrap()
+				})
+				if resetBtn.Hovered() {
+					resetBtn.Background(p.accentSoft)
+				}
+				if resetBtn.Clicked() {
+					st.resetFilters()
+				}
+			} else {
+				ui.Text(c, "自定义优先于订阅").FontSize(10.5).TextColor(p.textMuted).NoWrap()
+			}
+		})
+
+		// 5. 虚拟化规则卡片列表（单屏只渲染可见行，支持万级规则流畅滚动）
+		if len(filtered) == 0 {
+			ui.Column(c).Grow(1).Center().Radius(10).Background(p.cardElevated).Border(1, p.border).Children(func() {
+				emptyText := "暂无生效规则"
+				if len(st.entries) > 0 {
+					emptyText = "没有符合当前筛选条件的规则"
+				}
+				ui.Text(c, emptyText).FontSize(12).TextColor(p.textMuted)
+			})
+		} else {
+			ui.List(c.Key("active-rules-list"), &st.listState, len(filtered), func(i int) {
+				vm.renderActiveRuleRow(c, p, filtered[i])
+			}).Grow(1).MinHeight(0).Margin(0, -10, 0, 0)
+		}
 	})
 	if modal.Dismissed() {
 		vm.closeActiveRulesModal()
