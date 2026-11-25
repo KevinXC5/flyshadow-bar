@@ -470,7 +470,7 @@ func (vm *viewModel) renderActiveRuleRow(c *ui.Context, p palette, entry config.
 				if vm.app != nil {
 					mygo.Clipboard.WriteText(r.Domain)
 				}
-				vm.toastMsg = "已复制 " + r.Domain
+				vm.showToast("已复制 " + r.Domain)
 			}
 		})
 	})

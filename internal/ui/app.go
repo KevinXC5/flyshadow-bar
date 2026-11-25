@@ -166,7 +166,7 @@ func (a *App) onReady(opts RunOptions) {
 	} else if opts.ShowOnceOnStart {
 		a.ensureWindow()
 		if a.vm != nil && version.Version != "" && version.Version != "dev" {
-			a.vm.toastMsg = "已更新至 " + version.Version
+			a.vm.queueToastOnShow("已更新至 " + version.Version)
 		}
 		a.showWindow()
 	}
@@ -302,7 +302,12 @@ func (a *App) ensureWindow() {
 		a.refreshTrayMenu()
 	})
 	a.win.OnShow(func() { a.refreshTrayMenu() })
-	a.win.OnHide(func() { a.refreshTrayMenu() })
+	a.win.OnHide(func() {
+		if a.vm != nil {
+			a.vm.clearToastsOnHide()
+		}
+		a.refreshTrayMenu()
+	})
 }
 
 func (a *App) connectionsPollLoop() {
@@ -350,7 +355,7 @@ func (a *App) resetProcessTraffic() {
 	a.updateWindow(func() {
 		if a.vm != nil {
 			a.vm.procTraffic = procStats
-			a.vm.toastMsg = "已重置进程流量统计"
+			a.vm.showToast("已重置进程流量统计")
 		}
 	})
 }
@@ -623,7 +628,7 @@ func (a *App) installCLILink() {
 			}
 			a.vm.cliInstalling = false
 			if err != nil {
-				a.vm.toastMsg = "链接 fsbar 失败: " + err.Error()
+				a.vm.showToast("链接 fsbar 失败: " + err.Error())
 				a.vm.cliStatus = cliinstall.Detect()
 				a.vm.cliStatusLoaded = true
 				return
@@ -631,9 +636,9 @@ func (a *App) installCLILink() {
 			a.vm.cliStatus = st
 			a.vm.cliStatusLoaded = true
 			if st.LinkPath != "" {
-				a.vm.toastMsg = "已链接 fsbar 至 " + st.LinkPath
+				a.vm.showToast("已链接 fsbar 至 " + st.LinkPath)
 			} else {
-				a.vm.toastMsg = "命令行工具 fsbar 已就绪"
+				a.vm.showToast("命令行工具 fsbar 已就绪")
 			}
 		})
 	}()
@@ -657,7 +662,7 @@ func (a *App) openLogDirectory() {
 			log.Printf("[app] 打开日志目录失败 (%s): %v", p, err)
 			a.updateWindow(func() {
 				if a.vm != nil {
-					a.vm.toastMsg = "打开日志目录失败: " + err.Error()
+					a.vm.showToast("打开日志目录失败: " + err.Error())
 				}
 			})
 		}

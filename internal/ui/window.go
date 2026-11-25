@@ -86,6 +86,44 @@ type viewModel struct {
 	cliStatusLoaded     bool
 	cliInstalling       bool
 	toastMsg            string
+	toastExpiresAt      time.Time
+	dismissActiveToasts bool
+	toastVisibleFn      func() bool
+}
+
+const toastPendingTTL = 2 * time.Second
+
+func (vm *viewModel) isToastVisible() bool {
+	if vm.toastVisibleFn != nil {
+		return vm.toastVisibleFn()
+	}
+	return vm.app == nil || vm.app.isWindowVisible()
+}
+
+// showToast 仅在主窗口当前可见时排队瞬时提示，避免窗口隐藏期间的异步结果（如测速完成）
+// 积压到下次重新打开窗口时才突然弹出。
+func (vm *viewModel) showToast(msg string) {
+	if msg == "" || !vm.isToastVisible() {
+		return
+	}
+	vm.toastMsg = msg
+	vm.toastExpiresAt = time.Now().Add(toastPendingTTL)
+}
+
+// queueToastOnShow 排队一条明确需要在下次打开窗口时展示的提示（如更新重启后的版本提示）。
+func (vm *viewModel) queueToastOnShow(msg string) {
+	if msg == "" {
+		return
+	}
+	vm.toastMsg = msg
+	vm.toastExpiresAt = time.Time{}
+}
+
+// clearToastsOnHide 在主窗口收起时丢弃未消费的瞬时提示，并标记下次重开首帧清掉残留 Toast。
+func (vm *viewModel) clearToastsOnHide() {
+	vm.toastMsg = ""
+	vm.toastExpiresAt = time.Time{}
+	vm.dismissActiveToasts = true
 }
 
 func newViewModel(app *App, initial engine.Snapshot) *viewModel {
@@ -231,9 +269,18 @@ func (vm *viewModel) render(c *ui.Context) {
 		c.OnShortcut(ui.Cmd, ui.KeyQ, mygo.App.Quit)
 	}
 
+	if vm.dismissActiveToasts {
+		c.CloseToast("")
+		vm.dismissActiveToasts = false
+	}
 	if vm.toastMsg != "" {
-		c.Toast(vm.toastMsg)
+		msg := vm.toastMsg
+		exp := vm.toastExpiresAt
 		vm.toastMsg = ""
+		vm.toastExpiresAt = time.Time{}
+		if exp.IsZero() || !time.Now().After(exp) {
+			c.Toast(msg)
+		}
 	}
 
 	base := c.Theme()
@@ -763,7 +810,7 @@ func (vm *viewModel) submitSubscribePassword() {
 			vm.subPasswordShow = false
 			vm.subModalErr = ""
 			vm.subModalOpen = false
-			vm.toastMsg = "订阅已配置并同步"
+			vm.showToast("订阅已配置并同步")
 		})
 	}()
 }
@@ -1017,7 +1064,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 					if saveBtn.Clicked() || inp.Submitted() {
 						port, err := strconv.Atoi(strings.TrimSpace(vm.portDraft))
 						if err != nil || port <= 0 || port > 65535 {
-							vm.toastMsg = "端口号需在 1-65535 之间"
+							vm.showToast("端口号需在 1-65535 之间")
 						} else {
 							vm.portDirty = false
 							allowLAN := snap.AllowLAN
@@ -1032,7 +1079,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 						if vm.app != nil {
 							mygo.Clipboard.WriteText(cmd)
 						}
-						vm.toastMsg = "已复制代理命令"
+						vm.showToast("已复制代理命令")
 					}
 				})
 
@@ -1131,9 +1178,9 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 					if vm.app != nil {
 						if err := mygo.App.SetOpenAtLogin(v); err != nil {
 							vm.openAtLogin = mygo.App.OpenAtLogin()
-							vm.toastMsg = "设置失败: " + err.Error()
+							vm.showToast("设置失败: " + err.Error())
 						} else {
-							vm.toastMsg = toggleToast("开机自启", v)
+							vm.showToast(toggleToast("开机自启", v))
 						}
 					}
 				})
@@ -1279,7 +1326,7 @@ func (vm *viewModel) installNativeUpdate() {
 				return
 			}
 			vm.applyNativeUpdateStatus(st)
-			vm.toastMsg = "更新已就绪，重启后生效"
+			vm.showToast("更新已就绪，重启后生效")
 		})
 		mygo.RunOnMain(func() { vm.app.refreshTrayMenu() })
 	}()
@@ -1358,9 +1405,9 @@ func (vm *viewModel) runAsync(fn func() error, okToast string) {
 		err := fn()
 		vm.app.updateWindow(func() {
 			if err != nil {
-				vm.toastMsg = err.Error()
+				vm.showToast(err.Error())
 			} else if okToast != "" {
-				vm.toastMsg = okToast
+				vm.showToast(okToast)
 			}
 		})
 	}()

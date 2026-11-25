@@ -696,6 +696,56 @@ func TestInteractiveControlsUsePointerCursor(t *testing.T) {
 	}
 }
 
+func TestToastLifecycleAcrossWindowHide(t *testing.T) {
+	visible := true
+	vm := newViewModel(nil, engine.Snapshot{
+		State: engine.StateConnected,
+		Nodes: []engine.NodeSnapshot{
+			{ID: 1, DisplayName: "香港 01", Selected: true, DelayMs: 42},
+		},
+	})
+	vm.toastVisibleFn = func() bool { return visible }
+
+	tt := ui.NewTester(vm.render, 500, 820)
+
+	// 1. 窗口可见时，测速完成等瞬时提示应正常展示
+	vm.showToast("测速完成")
+	tt.Frame()
+	if !tt.HasText("测速完成") {
+		t.Fatalf("expected toast while window is visible, texts=%v", tt.Texts())
+	}
+
+	// 2. 隐藏窗口后，残留的活跃 Toast 应在下次重新显示时立即清除，且隐藏期间产生的瞬时 Toast 被忽略
+	visible = false
+	vm.clearToastsOnHide()
+	vm.showToast("测速完成")
+	if vm.toastMsg != "" {
+		t.Fatalf("expected toastMsg to be dropped while window is hidden, got %q", vm.toastMsg)
+	}
+	visible = true
+	tt.Frame()
+	if tt.HasText("测速完成") {
+		t.Fatalf("stale toast should not appear after reopening window, texts=%v", tt.Texts())
+	}
+
+	// 3. 已过期的待展示瞬时 Toast 也不应再渲染
+	vm.showToast("过期的提示")
+	vm.toastExpiresAt = time.Now().Add(-time.Second)
+	tt.Frame()
+	if tt.HasText("过期的提示") {
+		t.Fatalf("expired pending toast should not render, texts=%v", tt.Texts())
+	}
+
+	// 4. 更新重启后显式排队的提示（queueToastOnShow）在首次打开窗口时仍应展示
+	visible = false
+	vm.queueToastOnShow("已更新至 v1.2.3")
+	visible = true
+	tt.Frame()
+	if !tt.HasText("已更新至 v1.2.3") {
+		t.Fatalf("queued launch toast should render on window show, texts=%v", tt.Texts())
+	}
+}
+
 func assertDialogCentered(t *testing.T, name string, bounds ui.Rect, winW, winH float32) {
 	t.Helper()
 	if bounds.W <= 0 || bounds.H <= 0 {

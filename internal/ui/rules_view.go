@@ -333,7 +333,7 @@ func (vm *viewModel) renderRuleRow(c *ui.Context, p palette, rule config.DomainR
 func (vm *viewModel) submitRuleDraft() {
 	dom := strings.TrimSpace(vm.ruleDomainDraft)
 	if dom == "" {
-		vm.toastMsg = "请输入规则内容"
+		vm.showToast("请输入规则内容")
 		return
 	}
 
