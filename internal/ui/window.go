@@ -45,13 +45,18 @@ type viewModel struct {
 	ruleSearchQuery  string
 	ruleFilterAction int // -1=全部, 0=直连, 1=拒绝, 2=代理
 
-	// 实时连接页状态
+	// 实时连接与进程流量页状态
+	connSubTab       int // 0=连接列表, 1=进程流量
 	connections      []core.ConnectionInfo
 	connSearchQuery  string
 	connsPaused      bool
 	connSortField    connSortField
 	connSortAsc      bool
 	connSortMenuOpen bool
+	procTraffic      engine.ProcessTrafficSnapshot
+	procSearchQuery  string
+	procOnlyProxy    bool
+	procSortField    procSortField
 
 	// 订阅密码配置弹窗状态
 	subModalOpen     bool
@@ -63,12 +68,14 @@ type viewModel struct {
 	// 生效分流规则查看弹窗状态
 	activeRulesModal activeRulesModalState
 
-	checkingUpdate      bool
-	updateNativeEnabled bool
-	updateAvailable     string
-	updateNotes         string
-	updateInstalled     bool
-	updateDownloading   bool
+	checkingUpdate         bool
+	updateNativeEnabled    bool
+	updateAvailable        string
+	updateInstalledVersion string
+	updateCanReinstall     bool
+	updateNotes            string
+	updateInstalled        bool
+	updateDownloading      bool
 	updateDownloaded    int64
 	updateTotal         int64
 	updateCancel        context.CancelFunc
@@ -89,6 +96,7 @@ func newViewModel(app *App, initial engine.Snapshot) *viewModel {
 		ruleMatchDraft:   config.MatchDomainSuffix,
 		ruleActionDraft:  2,
 		ruleFilterAction: -1,
+		procOnlyProxy:    true,
 	}
 	if app != nil && app.updates != nil {
 		vm.applyNativeUpdateStatus(app.updates.Status())
@@ -99,8 +107,35 @@ func newViewModel(app *App, initial engine.Snapshot) *viewModel {
 func (vm *viewModel) applyNativeUpdateStatus(st UpdateStatus) {
 	vm.updateNativeEnabled = st.Enabled
 	vm.updateAvailable = st.Available
+	vm.updateInstalledVersion = st.InstalledVersion
+	vm.updateCanReinstall = st.CanReinstall
 	vm.updateNotes = st.Notes
 	vm.updateInstalled = st.Installed
+}
+
+func (vm *viewModel) readyUpdateVersion() string {
+	if vm.updateInstalledVersion != "" {
+		return vm.updateInstalledVersion
+	}
+	return vm.updateAvailable
+}
+
+func (vm *viewModel) hasSupersedingUpdate() bool {
+	if !vm.updateInstalled || vm.updateAvailable == "" {
+		return false
+	}
+	installedVer := vm.readyUpdateVersion()
+	return installedVer != "" && updater.CompareVersions(vm.updateAvailable, installedVer) > 0
+}
+
+func (vm *viewModel) canInstallUpdate() bool {
+	if !vm.updateNativeEnabled || vm.updateAvailable == "" {
+		return false
+	}
+	if !vm.updateInstalled {
+		return true
+	}
+	return vm.updateCanReinstall && vm.hasSupersedingUpdate()
 }
 
 // palette 定义浅色 / 深色下的克制配色层次，主视觉为冷静的靛青蓝点缀。
@@ -1218,7 +1253,7 @@ func (vm *viewModel) checkUpdate() {
 }
 
 func (vm *viewModel) installNativeUpdate() {
-	if vm.app == nil || vm.app.updates == nil || vm.updateDownloading || vm.updateInstalled {
+	if vm.app == nil || vm.app.updates == nil || vm.updateDownloading || !vm.canInstallUpdate() {
 		return
 	}
 	if vm.app.updateProgressReset != nil {

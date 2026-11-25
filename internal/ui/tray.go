@@ -610,9 +610,13 @@ func (tc *trayController) buildMenuForOS(snap engine.Snapshot, goos string) *myg
 	if tc.app != nil && tc.app.updates != nil {
 		st := tc.app.updates.Status()
 		if st.Installed {
+			readyVer := st.InstalledVersion
+			if readyVer == "" {
+				readyVer = st.Available
+			}
 			items = append(items, &mygo.MenuItem{
 				ID:    "action-update-restart",
-				Label: fmt.Sprintf("重启更新至 %s", st.Available),
+				Label: fmt.Sprintf("重启更新至 %s", readyVer),
 				Click: func(*mygo.MenuItem, *mygo.Window) {
 					_ = tc.app.updates.Restart()
 				},
@@ -742,7 +746,7 @@ func (tc *trayController) menuSignature(snap engine.Snapshot) string {
 	}
 	if tc.app != nil && tc.app.updates != nil {
 		st := tc.app.updates.Status()
-		fmt.Fprintf(&b, "|u:%s:%t", st.Available, st.Installed)
+		fmt.Fprintf(&b, "|u:%s:%s:%t", st.InstalledVersion, st.Available, st.Installed)
 	}
 	return b.String()
 }

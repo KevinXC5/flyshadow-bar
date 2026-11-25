@@ -544,6 +544,93 @@ func TestActiveRulesModalBrowseAndFilter(t *testing.T) {
 	}
 }
 
+func TestProcessTrafficViewAndSupersedingUpdateBanner(t *testing.T) {
+	vm := newViewModel(nil, engine.Snapshot{
+		State:     engine.StateConnected,
+		ModeCode:  core.ProxyModeRule,
+		ProxyPort: 7890,
+	})
+	vm.activeTab = 2
+	vm.connections = []core.ConnectionInfo{
+		{Protocol: "TCP", SourceAddr: "127.0.0.1", SourcePort: 50001, TargetAddr: "video.example", TargetPort: 443, ProcessName: "Google Chrome", ProxyType: "Proxy", ActiveTime: 1000},
+		{Protocol: "TCP", SourceAddr: "127.0.0.1", SourcePort: 50002, TargetAddr: "cn.example", TargetPort: 443, ProcessName: "curl", ProxyType: "Direct", ActiveTime: 2000},
+	}
+	vm.procTraffic = engine.ProcessTrafficSnapshot{
+		Since:               time.Date(2026, 11, 25, 21, 0, 0, 0, time.Local).UnixMilli(),
+		TotalProxyUpload:    10 * 1024 * 1024,
+		TotalProxyDownload:  90 * 1024 * 1024,
+		TotalDirectUpload:   2 * 1024 * 1024,
+		TotalDirectDownload: 18 * 1024 * 1024,
+		Processes: []engine.ProcessTrafficStat{
+			{
+				ProcessName:        "Google Chrome",
+				ProxyUploadBytes:   8 * 1024 * 1024,
+				ProxyDownloadBytes: 72 * 1024 * 1024,
+				ProxyDownloadSpeed: 2 * 1024 * 1024,
+				DownloadSpeedBps:   2 * 1024 * 1024,
+				ActiveConns:        3,
+				ProxyActiveConns:   3,
+				TotalConns:         12,
+			},
+			{
+				ProcessName:        "git",
+				ProxyUploadBytes:   2 * 1024 * 1024,
+				ProxyDownloadBytes: 18 * 1024 * 1024,
+				TotalConns:         4,
+			},
+			{
+				ProcessName:         "curl",
+				DirectUploadBytes:   2 * 1024 * 1024,
+				DirectDownloadBytes: 18 * 1024 * 1024,
+				ActiveConns:         1,
+				TotalConns:          2,
+			},
+		},
+	}
+
+	tt := ui.NewTester(vm.render, 500, 820)
+	if err := tt.Click("进程流量"); err != nil {
+		t.Fatalf("click 进程流量: %v", err)
+	}
+	// 默认仅代理模式：应展示 Google Chrome (80%) 与 git (20%)，隐藏纯直连的 curl
+	if vm.connSubTab != 1 || !tt.HasText("Google Chrome") || !tt.HasText("80.0%") || !tt.HasText("git") || tt.HasText("curl") {
+		t.Fatalf("proxy-only process traffic view mismatch: subTab=%d texts=%v", vm.connSubTab, tt.Texts())
+	}
+
+	// 切换至「全部」后应能看到纯直连进程 curl
+	if err := tt.Click("全部"); err != nil {
+		t.Fatalf("click 全部: %v", err)
+	}
+	if vm.procOnlyProxy || !tt.HasText("curl") {
+		t.Fatalf("all-traffic scope should display direct process curl, onlyProxy=%v texts=%v", vm.procOnlyProxy, tt.Texts())
+	}
+
+	// 点击 Google Chrome 行应切回连接列表并自动填入进程筛选词
+	if err := tt.Click("Google Chrome"); err != nil {
+		t.Fatalf("click Google Chrome row: %v", err)
+	}
+	if vm.connSubTab != 0 || vm.connSearchQuery != "Google Chrome" {
+		t.Fatalf("clicking process row should jump to filtered connection list: subTab=%d query=%q", vm.connSubTab, vm.connSearchQuery)
+	}
+
+	// 验证已就绪旧版且线上出现更新版时，顶部横幅文案正确区分 Windows 与 macOS
+	vm.updateNativeEnabled = true
+	vm.updateInstalled = true
+	vm.updateInstalledVersion = "0.2.12"
+	vm.updateAvailable = "0.2.14"
+	vm.updateCanReinstall = false
+	ttWinBanner := ui.NewTester(vm.render, 500, 820)
+	if !ttWinBanner.HasText("新版本 0.2.12 已就绪") || !ttWinBanner.HasText("线上已有更新版 0.2.14，重启后将继续升级") {
+		t.Fatalf("windows superseding banner mismatch: texts=%v", ttWinBanner.Texts())
+	}
+
+	vm.updateCanReinstall = true
+	ttMacBanner := ui.NewTester(vm.render, 500, 820)
+	if !ttMacBanner.HasText("新版本 0.2.12 已就绪") || !ttMacBanner.HasText("下新版") {
+		t.Fatalf("darwin superseding banner mismatch: texts=%v", ttMacBanner.Texts())
+	}
+}
+
 func assertDialogCentered(t *testing.T, name string, bounds ui.Rect, winW, winH float32) {
 	t.Helper()
 	if bounds.W <= 0 || bounds.H <= 0 {

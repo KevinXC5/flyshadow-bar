@@ -21,6 +21,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/netproxy"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/updater"
 	"github.com/KevinXC5/flyshadow-bar/internal/version"
 )
 
@@ -37,11 +38,19 @@ var updateProgressNow = time.Now
 
 // UpdateStatus 描述应用内 MyGo 签名增量更新的当前状态。
 type UpdateStatus struct {
-	Version   string `json:"version"`
-	Enabled   bool   `json:"enabled"`
-	Available string `json:"available"`
-	Notes     string `json:"notes"`
-	Installed bool   `json:"installed"`
+	Version          string `json:"version"`
+	Enabled          bool   `json:"enabled"`
+	Available        string `json:"available"`
+	InstalledVersion string `json:"installedVersion"`
+	Notes            string `json:"notes"`
+	Installed        bool   `json:"installed"`
+	CanReinstall     bool   `json:"canReinstall"`
+}
+
+// HasSupersedingUpdate 报告是否已有已就绪更新，且远端又发布了比该已就绪版本更新的版本。
+func (s UpdateStatus) HasSupersedingUpdate() bool {
+	return s.Installed && s.Available != "" && s.InstalledVersion != "" &&
+		updater.CompareVersions(s.Available, s.InstalledVersion) > 0
 }
 
 // updateCanceledError 保留 context.Canceled 语义，同时提供中文提示。
@@ -52,11 +61,12 @@ func (updateCanceledError) Unwrap() error { return context.Canceled }
 
 // UpdateManager 将检查、Ed25519 签名验证与 bsdiff 增量安装委托给 mygo.Updater。
 type UpdateManager struct {
-	mu            sync.Mutex
-	pending       *mygo.Update
-	busy          bool
-	installed     bool
-	cancelInstall context.CancelFunc
+	mu               sync.Mutex
+	pending          *mygo.Update
+	busy             bool
+	installed        bool
+	installedVersion string
+	cancelInstall    context.CancelFunc
 
 	cachedNotes        string
 	cachedNotesPending *mygo.Update
@@ -64,11 +74,12 @@ type UpdateManager struct {
 	cachedNotesVersion string
 
 	// 依赖注入钩子，未设置时默认调用 mygo.Updater。
-	versionFn func() string
-	enabledFn func() bool
-	checkFn   func(context.Context) (*mygo.Update, error)
-	installFn func(context.Context, *mygo.Update, func(int64, int64)) error
-	restartFn func()
+	versionFn      func() string
+	enabledFn      func() bool
+	canReinstallFn func() bool
+	checkFn        func(context.Context) (*mygo.Update, error)
+	installFn      func(context.Context, *mygo.Update, func(int64, int64)) error
+	restartFn      func()
 
 	availableFn   func(UpdateStatus)
 	readyFn       func(UpdateStatus)
@@ -295,6 +306,16 @@ func (u *UpdateManager) enabled() bool {
 	return mygo.Updater.Enabled()
 }
 
+// canReinstallBeforeRestart 报告当前平台是否支持在未重启应用前再次安装覆盖已暂存更新：
+// - macOS：mygo.Updater 通过 stageBundle 暂存新 .app，二次 Install 会自动替换并清理旧暂存包；
+// - Windows：mygo.Updater 原地将运行中 .exe 重命名为固定 .old-<pid>，同进程二次 Install 会撞进程文件锁。
+func (u *UpdateManager) canReinstallBeforeRestart() bool {
+	if u.canReinstallFn != nil {
+		return u.canReinstallFn()
+	}
+	return runtime.GOOS == "darwin"
+}
+
 func (u *UpdateManager) check(ctx context.Context) (*mygo.Update, error) {
 	if u.checkFn != nil {
 		return u.checkFn(ctx)
@@ -320,13 +341,17 @@ func (u *UpdateManager) Status() UpdateStatus {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	status := UpdateStatus{
-		Version:   u.version(),
-		Enabled:   u.enabled(),
-		Installed: u.installed,
+		Version:          u.version(),
+		Enabled:          u.enabled(),
+		Installed:        u.installed,
+		InstalledVersion: u.installedVersion,
+		CanReinstall:     u.canReinstallBeforeRestart(),
 	}
 	if u.pending != nil {
 		status.Available = u.pending.Version
 		status.Notes = u.resolveNotesLocked(status.Version)
+	} else if u.installed && u.installedVersion != "" {
+		status.Available = u.installedVersion
 	}
 	return status
 }
@@ -350,15 +375,12 @@ func (u *UpdateManager) resolveNotesLocked(currentVersion string) string {
 }
 
 // Check 查询当前平台的签名更新清单。
+// 即使已有已暂存就绪的版本，仍会向远端确认是否发布了更新版本，避免重启后再次提示升级。
 func (u *UpdateManager) Check(ctx context.Context) (UpdateStatus, error) {
 	if !u.enabled() {
 		return UpdateStatus{}, mygo.ErrUpdatesDisabled
 	}
 	u.mu.Lock()
-	if u.installed {
-		u.mu.Unlock()
-		return u.Status(), nil
-	}
 	if u.busy {
 		u.mu.Unlock()
 		return UpdateStatus{}, errors.New("正在检查或安装更新，请稍后再试")
@@ -379,27 +401,42 @@ func (u *UpdateManager) Check(ctx context.Context) (UpdateStatus, error) {
 		log.Printf("[updater] 检查更新失败: %v", err)
 		return UpdateStatus{}, errors.New("检查更新失败，请检查网络连接后重试")
 	}
-	if up != nil {
-		log.Printf("[updater] 发现新版本: current=%s available=%s", u.version(), up.Version)
-	} else {
-		log.Printf("[updater] 当前已是最新版本: %s", u.version())
-	}
+
 	u.mu.Lock()
-	u.pending = up
-	u.resolveNotesLocked(u.version())
+	if u.installed {
+		if up != nil && (u.installedVersion == "" || updater.CompareVersions(up.Version, u.installedVersion) > 0) {
+			log.Printf("[updater] 已就绪版本 %s 之外发现更新版本: %s", u.installedVersion, up.Version)
+			u.pending = up
+			u.resolveNotesLocked(u.version())
+		} else {
+			log.Printf("[updater] 已暂存版本 %s 仍为最新版本", u.installedVersion)
+		}
+	} else {
+		if up != nil {
+			log.Printf("[updater] 发现新版本: current=%s available=%s", u.version(), up.Version)
+		} else {
+			log.Printf("[updater] 当前已是最新版本: %s", u.version())
+		}
+		u.pending = up
+		u.resolveNotesLocked(u.version())
+	}
 	u.mu.Unlock()
 	return u.Status(), nil
 }
 
 // Install 优先下载当前版本对应的签名增量补丁（.delta），校验通过后替换应用；
 // 若增量补丁不可用或校验失败，MyGo 会自动回退为下载完整签名归档。
+// 在支持未重启覆盖的平台（macOS）上，若远端发布了高于已暂存版本的新版本，允许直接覆盖升级至最新版。
 func (u *UpdateManager) Install(ctx context.Context) (UpdateStatus, error) {
 	u.mu.Lock()
 	if u.busy {
 		u.mu.Unlock()
 		return UpdateStatus{}, errors.New("正在检查或安装更新，请稍后再试")
 	}
-	if u.installed || u.pending == nil {
+	canSupersede := u.installed && u.canReinstallBeforeRestart() &&
+		u.pending != nil && u.installedVersion != "" &&
+		updater.CompareVersions(u.pending.Version, u.installedVersion) > 0
+	if u.pending == nil || (u.installed && !canSupersede) {
 		u.mu.Unlock()
 		return UpdateStatus{}, errors.New("没有需要安装的更新")
 	}
@@ -441,6 +478,7 @@ func (u *UpdateManager) Install(ctx context.Context) (UpdateStatus, error) {
 	log.Printf("[updater] 更新已安装就绪，等待重启生效: target=%s", up.Version)
 	u.mu.Lock()
 	u.installed = true
+	u.installedVersion = up.Version
 	u.mu.Unlock()
 	return u.Status(), nil
 }
@@ -470,8 +508,9 @@ func (u *UpdateManager) Restart() error {
 	return nil
 }
 
-// StartBackground 在启动 5 秒后首次检查更新，之后每 30 分钟巡检一次；
-// 发现新版本后由于增量包极小，直接在后台静默完成增量下载与签名安装，就绪后通过 readyFn 提示重启。
+// StartBackground 在启动 5 秒后首次检查更新，之后每 30 分钟持续巡检；
+// 发现新版本后直接在后台静默完成增量下载与签名安装，就绪后通过 readyFn 提示重启。
+// 若用户长时间未重启且线上又发布了更高版本，macOS 会自动静默覆盖暂存至最新版，Windows 则刷新横幅提醒重启后继续升级。
 func (u *UpdateManager) StartBackground(stopCh <-chan struct{}) {
 	if !u.enabled() {
 		return
@@ -497,11 +536,7 @@ func (u *UpdateManager) StartBackground(stopCh <-chan struct{}) {
 			case <-stopCh:
 				return
 			case <-timer.C:
-				installed, failed := u.checkAndAutoInstall(stopCh)
-				if installed {
-					// 新版本已安装就绪，等待用户重启生效即可，无需继续轮询
-					return
-				}
+				_, failed := u.checkAndAutoInstall(stopCh)
 				if failed && !retriedEarly {
 					// 刚启动时隧道可能尚在建连，30 秒后快速补检一次
 					retriedEarly = true
@@ -516,7 +551,7 @@ func (u *UpdateManager) StartBackground(stopCh <-chan struct{}) {
 }
 
 // checkAndAutoInstall 执行一轮静默检查，若发现新版本则自动后台下载安装增量更新。
-// 返回 (installed, failed)：installed 为 true 表示更新已安装就绪，failed 表示本轮检查或安装出错。
+// 返回 (installed, failed)：installed 为 true 表示已有更新就绪，failed 表示本轮检查或安装出错。
 func (u *UpdateManager) checkAndAutoInstall(stopCh <-chan struct{}) (bool, bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -528,16 +563,38 @@ func (u *UpdateManager) checkAndAutoInstall(stopCh <-chan struct{}) (bool, bool)
 		}
 	}()
 
+	prevStatus := u.Status()
 	status, err := u.Check(ctx)
 	if err != nil {
-		return false, true
+		return prevStatus.Installed, true
 	}
+
 	if status.Installed {
-		if u.readyFn != nil {
-			u.readyFn(status)
+		if status.HasSupersedingUpdate() {
+			if status.CanReinstall {
+				if u.availableFn != nil {
+					u.availableFn(status)
+				}
+				installedStatus, err := u.Install(ctx)
+				if err != nil || !installedStatus.Installed {
+					if u.installFailFn != nil {
+						u.installFailFn()
+					}
+					return true, true
+				}
+				if u.readyFn != nil {
+					u.readyFn(installedStatus)
+				}
+				return true, false
+			}
+			// 不支持未重启覆盖的平台（Windows）：仅在首次发现更新版时刷新界面提示，避免重复撞文件锁
+			if status.Available != prevStatus.Available && u.readyFn != nil {
+				u.readyFn(status)
+			}
 		}
 		return true, false
 	}
+
 	if status.Available == "" {
 		return false, false
 	}

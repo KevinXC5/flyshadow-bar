@@ -241,3 +241,120 @@ func TestUpdateManagerEarlyRetryAfterInitialFailure(t *testing.T) {
 		t.Fatalf("首轮失败后未按 retryDelay 触发快速重试")
 	}
 }
+
+func TestUpdateManagerSupersedingUpdateOnDarwinAutoReinstalls(t *testing.T) {
+	mgr := newUpdateManager(nil, nil)
+	mgr.versionFn = func() string { return "0.2.10" }
+	mgr.enabledFn = func() bool { return true }
+	mgr.canReinstallFn = func() bool { return true }
+	mgr.initialDelay = 10 * time.Millisecond
+	mgr.retryDelay = 15 * time.Millisecond
+	mgr.checkInterval = 25 * time.Millisecond
+
+	var checkCount int
+	var installedTargets []string
+	mgr.checkFn = func(context.Context) (*mygo.Update, error) {
+		checkCount++
+		if checkCount == 1 {
+			return &mygo.Update{Version: "0.2.11", Notes: "### 0.2.11\n\n第一版"}, nil
+		}
+		return &mygo.Update{Version: "0.2.13", Notes: "### 0.2.13\n\n最新版"}, nil
+	}
+	mgr.installFn = func(_ context.Context, up *mygo.Update, _ func(int64, int64)) error {
+		installedTargets = append(installedTargets, up.Version)
+		return nil
+	}
+
+	readyCh := make(chan UpdateStatus, 4)
+	mgr.readyFn = func(st UpdateStatus) {
+		readyCh <- st
+	}
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	mgr.StartBackground(stopCh)
+
+	// 1. 首轮自动装好 0.2.11
+	select {
+	case st1 := <-readyCh:
+		if !st1.Installed || st1.InstalledVersion != "0.2.11" || st1.Available != "0.2.11" {
+			t.Fatalf("首轮状态异常: %+v", st1)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("等待首轮 0.2.11 就绪超时")
+	}
+
+	// 2. 尚未重启期间线上发布了 0.2.13，下一轮巡检应自动覆盖暂存为 0.2.13
+	select {
+	case st2 := <-readyCh:
+		if !st2.Installed || st2.InstalledVersion != "0.2.13" || st2.Available != "0.2.13" {
+			t.Fatalf("二轮覆盖升级状态异常: %+v", st2)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("等待覆盖升级至 0.2.13 超时")
+	}
+
+	if len(installedTargets) != 2 || installedTargets[0] != "0.2.11" || installedTargets[1] != "0.2.13" {
+		t.Fatalf("安装目标顺序异常: %v", installedTargets)
+	}
+}
+
+func TestUpdateManagerSupersedingUpdateOnWindowsNotifiesWithoutReinstall(t *testing.T) {
+	mgr := newUpdateManager(nil, nil)
+	mgr.versionFn = func() string { return "0.2.10" }
+	mgr.enabledFn = func() bool { return true }
+	mgr.canReinstallFn = func() bool { return false }
+	mgr.initialDelay = 10 * time.Millisecond
+	mgr.retryDelay = 15 * time.Millisecond
+	mgr.checkInterval = 25 * time.Millisecond
+
+	checkCount := 0
+	installCalls := 0
+	mgr.checkFn = func(context.Context) (*mygo.Update, error) {
+		checkCount++
+		if checkCount == 1 {
+			return &mygo.Update{Version: "0.2.11"}, nil
+		}
+		return &mygo.Update{Version: "0.2.13"}, nil
+	}
+	mgr.installFn = func(_ context.Context, _ *mygo.Update, _ func(int64, int64)) error {
+		installCalls++
+		return nil
+	}
+
+	readyCh := make(chan UpdateStatus, 4)
+	mgr.readyFn = func(st UpdateStatus) {
+		readyCh <- st
+	}
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	mgr.StartBackground(stopCh)
+
+	// 1. 首轮安装 0.2.11
+	select {
+	case st1 := <-readyCh:
+		if !st1.Installed || st1.InstalledVersion != "0.2.11" {
+			t.Fatalf("首轮状态异常: %+v", st1)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("等待首轮就绪超时")
+	}
+
+	// 2. 下一轮检测到 0.2.13：Windows 不应二次调用 Install，但应刷新通知 HasSupersedingUpdate=true
+	select {
+	case st2 := <-readyCh:
+		if !st2.Installed || st2.InstalledVersion != "0.2.11" || st2.Available != "0.2.13" || !st2.HasSupersedingUpdate() {
+			t.Fatalf("Windows 发现更新版状态异常: %+v", st2)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("等待 Windows 新版本提示超时")
+	}
+
+	if installCalls != 1 {
+		t.Fatalf("Windows 未重启前不应二次调用 Install，got=%d", installCalls)
+	}
+	if _, err := mgr.Install(context.Background()); err == nil {
+		t.Fatalf("Windows 未重启前手动调用 Install 应被拒绝")
+	}
+}

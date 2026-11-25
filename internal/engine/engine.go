@@ -148,11 +148,13 @@ type Engine struct {
 	speedHistory      []SpeedSample
 	tunnelPingMs      int32
 
-	listeners     map[int]func(Snapshot)
-	nextSubID     int
-	connProcCache map[string]string
-	procLookupFn  func(proxyPort int) map[string]string
-	selfProcNames []string
+	listeners      map[int]func(Snapshot)
+	nextSubID      int
+	connProcCache  map[string]string
+	lastProcLookup time.Time
+	procLookupFn   func(proxyPort int) map[string]string
+	selfProcNames  []string
+	procTraffic    *processTrafficTracker
 
 	sysProxyCheckInterval time.Duration
 	connectPollInterval   time.Duration
@@ -204,6 +206,7 @@ func New(opts Options) (*Engine, error) {
 		connProcCache:         make(map[string]string),
 		procLookupFn:          lookupLoopbackClients,
 		selfProcNames:         currentSelfProcessNames(),
+		procTraffic:           newProcessTrafficTracker(time.Now()),
 		sysProxyCheckInterval: defaultSysProxyCheckInterval,
 		connectPollInterval:   defaultConnectPollInterval,
 		connectPollAttempts:   defaultConnectPollAttempts,
@@ -1182,13 +1185,17 @@ func (e *Engine) ActiveRules() []config.ActiveRuleEntry {
 	return cfg.ActiveRuleEntries()
 }
 
-// Connections 返回底层核心库当前活跃连接列表（按活跃时间降序）。
+// Connections 返回底层核心库当前活跃连接列表（按活跃时间降序），并顺带更新进程累计流量统计。
 func (e *Engine) Connections() ([]core.ConnectionInfo, error) {
 	list, err := e.core.TunnelConnections()
 	if err != nil {
 		return nil, err
 	}
-	e.enrichConnectionProcesses(list)
+	now := time.Now()
+	e.enrichConnectionProcesses(list, now, true)
+	if e.procTraffic != nil {
+		e.procTraffic.Observe(list, now)
+	}
 	sort.SliceStable(list, func(i, j int) bool {
 		if list[i].ActiveTime != list[j].ActiveTime {
 			return list[i].ActiveTime > list[j].ActiveTime
@@ -1200,8 +1207,25 @@ func (e *Engine) Connections() ([]core.ConnectionInfo, error) {
 	return list, nil
 }
 
+// ProcessTrafficStats 返回本次运行（或上次清零后）按进程聚合的代理与直连流量排行快照。
+func (e *Engine) ProcessTrafficStats() ProcessTrafficSnapshot {
+	if e.procTraffic == nil {
+		return ProcessTrafficSnapshot{}
+	}
+	return e.procTraffic.Snapshot()
+}
+
+// ResetProcessTraffic 清零按进程统计的累计流量，便于重新观察当前阶段的流量占用排行。
+func (e *Engine) ResetProcessTraffic() {
+	if e.procTraffic == nil {
+		return
+	}
+	e.procTraffic.Reset(time.Now())
+}
+
 // enrichConnectionProcesses 修正 macOS 下核心库按端口反查进程时误将代理服务端自身当作来源进程的问题。
-func (e *Engine) enrichConnectionProcesses(list []core.ConnectionInfo) {
+// forceLookup 为 false（后台定时采样）时仅在发现尚未缓存的未知连接且距上次反查超过节流间隔时才触发系统反查，降低开销。
+func (e *Engine) enrichConnectionProcesses(list []core.ConnectionInfo, now time.Time, forceLookup bool) {
 	if len(list) == 0 {
 		e.mu.Lock()
 		clear(e.connProcCache)
@@ -1213,11 +1237,26 @@ func (e *Engine) enrichConnectionProcesses(list []core.ConnectionInfo) {
 	proxyPort := e.cfg.ProxyPort
 	lookupFn := e.procLookupFn
 	selfNames := e.selfProcNames
+	lastLookup := e.lastProcLookup
+	needsLookup := false
+	for i := range list {
+		c := &list[i]
+		if _, cached := e.connProcCache[c.CloseKey()]; cached {
+			continue
+		}
+		if c.ProcessName == "" || isSelfProcessName(c.ProcessName, selfNames) {
+			needsLookup = true
+			break
+		}
+	}
 	e.mu.RUnlock()
 
 	var resolved map[string]string
-	if lookupFn != nil && proxyPort > 0 {
+	if lookupFn != nil && proxyPort > 0 && needsLookup && (forceLookup || now.Sub(lastLookup) >= minBackgroundProcLookupGap) {
 		resolved = lookupFn(proxyPort)
+		e.mu.Lock()
+		e.lastProcLookup = now
+		e.mu.Unlock()
 	}
 
 	e.mu.Lock()
@@ -1630,6 +1669,15 @@ func (e *Engine) sampleStats(now time.Time) {
 	e.tunnelPingMs = ping
 	e.appendSpeedSampleLocked(e.uploadSpeedBps, e.downloadSpeedBps)
 	e.mu.Unlock()
+
+	// 在后台每秒顺带采样活跃连接以持续累计各进程走代理与直连的流量，
+	// 即使主窗口未打开也能完整记录短连接和后台进程的流量大户。
+	if e.procTraffic != nil {
+		if conns, err := e.core.TunnelConnections(); err == nil {
+			e.enrichConnectionProcesses(conns, now, false)
+			e.procTraffic.Observe(conns, now)
+		}
+	}
 
 	e.emit()
 }

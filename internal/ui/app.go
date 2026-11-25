@@ -330,12 +330,27 @@ func (a *App) refreshConnections() {
 		return
 	}
 	list, err := a.eng.Connections()
-	if err != nil {
-		return
-	}
+	procStats := a.eng.ProcessTrafficStats()
 	a.updateWindow(func() {
 		if a.vm != nil {
-			a.vm.connections = list
+			if err == nil {
+				a.vm.connections = list
+			}
+			a.vm.procTraffic = procStats
+		}
+	})
+}
+
+func (a *App) resetProcessTraffic() {
+	if a.eng == nil {
+		return
+	}
+	a.eng.ResetProcessTraffic()
+	procStats := a.eng.ProcessTrafficStats()
+	a.updateWindow(func() {
+		if a.vm != nil {
+			a.vm.procTraffic = procStats
+			a.vm.toastMsg = "已重置进程流量统计"
 		}
 	})
 }

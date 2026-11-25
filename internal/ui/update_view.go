@@ -13,23 +13,6 @@ import (
 
 // renderUpdateTopBanner 在弹窗顶部展示后台或手动更新的下载进度条，以及安装就绪后的一键重启提示。
 func (vm *viewModel) renderUpdateTopBanner(c *ui.Context, p palette) {
-	if vm.updateInstalled && vm.updateAvailable != "" {
-		ui.Row(c).Padding(8, 12).Gap(10).Radius(11).AlignItems(ui.Center).
-			Background(p.successSoft).Border(1, p.success).Children(func() {
-			ui.Box(c).Size(8, 8).Radius(99).Background(p.success)
-			ui.Column(c).Grow(1).Gap(1).Children(func() {
-				ui.Text(c, fmt.Sprintf("新版本 %s 已就绪", vm.updateAvailable)).
-					FontSize(12.5).Bold().TextColor(p.success)
-				ui.Text(c, "重启后生效").
-					FontSize(10.5).TextColor(p.textSecondary)
-			})
-			if ui.PrimaryButton(c.Key("btn-banner-restart"), "立即重启").Padding(5, 12).Radius(7).Clicked() {
-				vm.restartForUpdate()
-			}
-		})
-		return
-	}
-
 	if vm.updateDownloading && vm.updateAvailable != "" {
 		title, detail, pctLabel, ratio := vm.updateProgressState()
 		ui.Column(c).Padding(8, 12).Gap(6).Radius(11).
@@ -51,6 +34,38 @@ func (vm *viewModel) renderUpdateTopBanner(c *ui.Context, p palette) {
 			ui.Progress(c.Key("banner-update-progress"), ratio).
 				Height(4.5).Radius(99).Background(p.pillBg).TextColor(p.accent).Label("更新下载进度")
 		})
+		return
+	}
+
+	if readyVer := vm.readyUpdateVersion(); vm.updateInstalled && readyVer != "" {
+		subText := "重启后生效"
+		hasNewer := vm.hasSupersedingUpdate()
+		if hasNewer {
+			if vm.updateCanReinstall {
+				subText = fmt.Sprintf("线上已有更新版 %s，可直接覆盖或立即重启", vm.updateAvailable)
+			} else {
+				subText = fmt.Sprintf("线上已有更新版 %s，重启后将继续升级", vm.updateAvailable)
+			}
+		}
+		ui.Row(c).Padding(8, 12).Gap(10).Radius(11).AlignItems(ui.Center).
+			Background(p.successSoft).Border(1, p.success).Children(func() {
+			ui.Box(c).Size(8, 8).Radius(99).Background(p.success)
+			ui.Column(c).Grow(1).Gap(1).Children(func() {
+				ui.Text(c, fmt.Sprintf("新版本 %s 已就绪", readyVer)).
+					FontSize(12.5).Bold().TextColor(p.success)
+				ui.Text(c, subText).
+					FontSize(10.5).TextColor(p.textSecondary).Wrap()
+			})
+			if hasNewer && vm.updateCanReinstall {
+				if ui.Button(c.Key("btn-banner-supersede"), "下新版").Padding(5, 10).Radius(7).
+					Tooltip("覆盖下载最新版本 " + vm.updateAvailable).Clicked() {
+					vm.installNativeUpdate()
+				}
+			}
+			if ui.PrimaryButton(c.Key("btn-banner-restart"), "立即重启").Padding(5, 12).Radius(7).Clicked() {
+				vm.restartForUpdate()
+			}
+		})
 	}
 }
 
@@ -60,10 +75,9 @@ func (vm *viewModel) renderUpdateSection(c *ui.Context, p palette) {
 		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
 			updateText := fmt.Sprintf("当前版本 %s", version.Version)
 			updateColor := p.textMuted
+			readyVer := vm.readyUpdateVersion()
+			hasNewer := vm.hasSupersedingUpdate()
 			switch {
-			case vm.updateInstalled:
-				updateText = fmt.Sprintf("新版本 %s 已就绪，重启后生效", vm.updateAvailable)
-				updateColor = p.success
 			case vm.updateDownloading:
 				updateText, _, _, _ = vm.updateProgressState()
 				updateColor = p.accent
@@ -73,6 +87,17 @@ func (vm *viewModel) renderUpdateSection(c *ui.Context, p palette) {
 			case vm.updateErr != "":
 				updateText = vm.updateErr
 				updateColor = p.danger
+			case vm.updateInstalled:
+				if hasNewer {
+					if vm.updateCanReinstall {
+						updateText = fmt.Sprintf("新版本 %s 已就绪，线上已有更新版 %s", readyVer, vm.updateAvailable)
+					} else {
+						updateText = fmt.Sprintf("新版本 %s 已就绪（线上已有 %s，重启后将继续升级）", readyVer, vm.updateAvailable)
+					}
+				} else {
+					updateText = fmt.Sprintf("新版本 %s 已就绪，重启后生效", readyVer)
+				}
+				updateColor = p.success
 			case vm.updateNativeEnabled && vm.updateAvailable != "":
 				updateText = fmt.Sprintf("有新版本 %s", vm.updateAvailable)
 				updateColor = p.success
@@ -88,13 +113,18 @@ func (vm *viewModel) renderUpdateSection(c *ui.Context, p palette) {
 			ui.Text(c, updateText).Grow(1).FontSize(11.5).TextColor(updateColor).Wrap()
 
 			switch {
-			case vm.updateInstalled:
-				if ui.PrimaryButton(c.Key("btn-restart-update"), "立即重启").Padding(5, 11).Radius(7).Clicked() {
-					vm.restartForUpdate()
-				}
 			case vm.updateDownloading:
 				if ui.Button(c.Key("btn-cancel-update"), "取消").Padding(5, 11).Radius(7).Clicked() {
 					vm.cancelUpdateDownload()
+				}
+			case vm.updateInstalled:
+				if hasNewer && vm.updateCanReinstall {
+					if ui.Button(c.Key("btn-install-supersede"), "更新至最新版").Padding(5, 10).Radius(7).Clicked() {
+						vm.installNativeUpdate()
+					}
+				}
+				if ui.PrimaryButton(c.Key("btn-restart-update"), "立即重启").Padding(5, 11).Radius(7).Clicked() {
+					vm.restartForUpdate()
 				}
 			case vm.updateNativeEnabled && vm.updateAvailable != "":
 				if ui.PrimaryButton(c.Key("btn-install-update"), "立即更新").Padding(5, 11).Radius(7).Clicked() {
@@ -108,7 +138,7 @@ func (vm *viewModel) renderUpdateSection(c *ui.Context, p palette) {
 					}
 				}
 			}
-			if !vm.updateDownloading && !vm.updateInstalled {
+			if !vm.updateDownloading {
 				if ui.Button(c.Key("btn-check-update"), "检查更新").Disabled(vm.checkingUpdate).Padding(5, 11).Radius(7).Clicked() {
 					vm.checkUpdate()
 				}
