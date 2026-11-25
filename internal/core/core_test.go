@@ -247,6 +247,108 @@ func TestLocateGeoIPRefreshesFromOfficialJar(t *testing.T) {
 	}
 }
 
+func TestLocateWindowsCoreLibSupportsSingleFlyShadowJarUpgrade(t *testing.T) {
+	barDir := t.TempDir()
+	legacyDir := t.TempDir()
+	installDir := t.TempDir()
+	appDir := filepath.Join(installDir, "app")
+	t.Setenv("FLYSHADOW_BAR_DIR", barDir)
+	t.Setenv("FLYSHADOW_CORE_LIB", "")
+
+	// 模拟旧版 Windows 安装：app\common-desktop-*.jar 包含 2.0.2 DLL
+	oldJar := filepath.Join(appDir, "common-desktop-oldhash.jar")
+	writeTestJar(t, oldJar, map[string][]byte{
+		WindowsJarEntry: []byte("win-core-2.0.2"),
+		GeoIPJarEntry:   []byte("win-geoip-v1"),
+	})
+
+	origOfficial := officialJarsFinder
+	origLegacy := legacyDirResolver
+	origExec := executableDirsFinder
+	origWinDirs := windowsInstallDirsFinder
+	t.Cleanup(func() {
+		officialJarsFinder = origOfficial
+		legacyDirResolver = origLegacy
+		executableDirsFinder = origExec
+		windowsInstallDirsFinder = origWinDirs
+	})
+	officialJarsFinder = func() []string {
+		return collectOfficialJarsFromDirs([]string{appDir, installDir})
+	}
+	legacyDirResolver = func() (string, error) { return legacyDir, nil }
+	executableDirsFinder = func() []string { return nil }
+	windowsInstallDirsFinder = func() []string { return []string{installDir} }
+
+	got1, err := locateWindowsCoreLib()
+	if err != nil {
+		t.Fatalf("locateWindowsCoreLib old jar: %v", err)
+	}
+	data1, err := os.ReadFile(got1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data1, []byte("win-core-2.0.2")) {
+		t.Fatalf("got payload %q, want win-core-2.0.2", string(data1))
+	}
+
+	// 模拟升级至 Windows 10.5.9：MSI 移除了 common-desktop-*.jar，合并为单一 app\FlyShadow.jar（即便 mtime 早于旧缓存也必须刷新）
+	if err := os.Remove(oldJar); err != nil {
+		t.Fatal(err)
+	}
+	uberJar := filepath.Join(appDir, "FlyShadow.jar")
+	writeTestJar(t, uberJar, map[string][]byte{
+		WindowsJarEntry: []byte("win-core-2.0.4-uberjar"),
+		GeoIPJarEntry:   []byte("win-geoip-v2-uberjar"),
+	})
+	older := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(uberJar, older, older); err != nil {
+		t.Fatal(err)
+	}
+
+	got2, err := locateWindowsCoreLib()
+	if err != nil {
+		t.Fatalf("locateWindowsCoreLib FlyShadow.jar: %v", err)
+	}
+	data2, err := os.ReadFile(got2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data2, []byte("win-core-2.0.4-uberjar")) {
+		t.Fatalf("cache did not refresh from FlyShadow.jar: got %q", string(data2))
+	}
+
+	_, geoBytes, err := LocateGeoIP()
+	if err != nil || !bytes.Equal(geoBytes, []byte("win-geoip-v2-uberjar")) {
+		t.Fatalf("LocateGeoIP from FlyShadow.jar = (%q, %v), want win-geoip-v2-uberjar", string(geoBytes), err)
+	}
+}
+
+func TestCollectOfficialJarsFromDirsDedupeAndSort(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	jarOld := filepath.Join(dir1, "common-desktop-111.jar")
+	jarNew := filepath.Join(dir2, "FlyShadow.jar")
+	if err := os.WriteFile(jarOld, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jarNew, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-1 * time.Hour)
+	newTime := time.Now()
+	_ = os.Chtimes(jarOld, oldTime, oldTime)
+	_ = os.Chtimes(jarNew, newTime, newTime)
+
+	got := collectOfficialJarsFromDirs([]string{dir1, dir2, dir1})
+	if len(got) != 2 {
+		t.Fatalf("got %d jars (%v), want 2", len(got), got)
+	}
+	if got[0] != jarNew || got[1] != jarOld {
+		t.Fatalf("got order %v, want [%s %s]", got, jarNew, jarOld)
+	}
+}
+
 // TestLiveCoreSmoke 仅在显式设置 FLYSHADOW_LIVE_TEST=1 时运行，使用空闲随机高端口，绝不干扰 7890。
 // 严格禁止输出任何节点密码、host 或用户敏感信息。
 func TestLiveCoreSmoke(t *testing.T) {

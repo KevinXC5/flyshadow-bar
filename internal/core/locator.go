@@ -26,9 +26,10 @@ const (
 )
 
 var (
-	officialJarsFinder   = findOfficialJars
-	legacyDirResolver    = config.LegacyDir
-	executableDirsFinder = executableCandidateDirs
+	officialJarsFinder       = findOfficialJars
+	legacyDirResolver        = config.LegacyDir
+	executableDirsFinder     = executableCandidateDirs
+	windowsInstallDirsFinder = windowsInstallDirs
 )
 
 func darwinJarEntries(goarch string) []string {
@@ -36,7 +37,22 @@ func darwinJarEntries(goarch string) []string {
 	case "amd64":
 		return []string{DarwinAMD64JarEntry, "darwin-x86_64/" + DarwinLibName}
 	default:
-		return []string{DarwinJarEntry}
+		return []string{DarwinJarEntry, "darwin-arm64/" + DarwinLibName}
+	}
+}
+
+func windowsJarEntries() []string {
+	return []string{
+		WindowsJarEntry,
+		"win32-x86_64/" + WindowsLibName,
+		WindowsLibName,
+	}
+}
+
+func geoIPJarEntries() []string {
+	return []string{
+		GeoIPJarEntry,
+		GeoIPFileName,
 	}
 }
 
@@ -81,9 +97,9 @@ func LocateGeoIP() (string, []byte, error) {
 		}
 	}
 
-	// 2. 优先从官方 common-desktop-*.jar 提取并按内容指纹自动刷新缓存
+	// 2. 优先从官方 JAR（FlyShadow.jar / common-desktop-*.jar）提取并按内容指纹自动刷新缓存
 	for _, jarPath := range officialJarsFinder() {
-		cachePath, err := extractFromJarCached(jarPath, GeoIPJarEntry, GeoIPFileName)
+		cachePath, err := extractFirstFromJarCached(jarPath, geoIPJarEntries(), GeoIPFileName)
 		if err == nil {
 			b, readErr := os.ReadFile(cachePath)
 			if readErr == nil && len(b) > 0 {
@@ -122,15 +138,13 @@ func locateDarwinCoreLib() (string, error) {
 		}
 	}
 
-	// 3. 优先从 /Applications/FlyShadow.app/Contents/app/common-desktop-*.jar 自动解压并按内容指纹刷新缓存。
+	// 3. 优先从官方 JAR（FlyShadow.jar / common-desktop-*.jar）自动解压并按内容指纹刷新缓存。
 	// 官方新版客户端已直接随 JAR 分发核心库（不再更新 ~/.FlyShadow/lib），必须先于旧目录与离线缓存检查，
 	// 避免用户更新官方客户端后仍误加载旧版核心库。
 	cacheFileName := fmt.Sprintf("darwin-%s-%s", runtime.GOARCH, DarwinLibName)
 	for _, jarPath := range officialJarsFinder() {
-		for _, entry := range darwinJarEntries(runtime.GOARCH) {
-			if extracted, err := extractFromJarCached(jarPath, entry, cacheFileName); err == nil {
-				return extracted, nil
-			}
+		if extracted, err := extractFirstFromJarCached(jarPath, darwinJarEntries(runtime.GOARCH), cacheFileName); err == nil {
+			return extracted, nil
 		}
 	}
 
@@ -167,15 +181,15 @@ func locateWindowsCoreLib() (string, error) {
 		}
 	}
 
-	// 3. 优先从安装目录内的 common-desktop-*.jar 提取并按内容指纹自动刷新缓存
+	// 3. 优先从安装目录内的官方 JAR（FlyShadow.jar / common-desktop-*.jar）提取并按内容指纹自动刷新缓存
 	for _, jarPath := range officialJarsFinder() {
-		if extracted, err := extractFromJarCached(jarPath, WindowsJarEntry, WindowsLibName); err == nil {
+		if extracted, err := extractFirstFromJarCached(jarPath, windowsJarEntries(), WindowsLibName); err == nil {
 			return extracted, nil
 		}
 	}
 
 	// 4. Windows 常见安装目录中的独立 DLL
-	for _, dir := range windowsInstallDirs() {
+	for _, dir := range windowsInstallDirsFinder() {
 		for _, sub := range []string{"", "app", "lib", "resources"} {
 			p := filepath.Join(dir, sub, WindowsLibName)
 			if isRegularFile(p) {
@@ -248,42 +262,61 @@ func geoIPFallbackDirs() []string {
 }
 
 func windowsInstallDirs() []string {
-	var dirs []string
+	var raw []string
+	// 优先使用 Windows 卸载注册表记录的实际安装目录，兼容自定义盘符与路径。
+	raw = append(raw, discoverWindowsRegistryInstallDirs()...)
 	for _, env := range []string{"LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"} {
 		base := strings.TrimSpace(os.Getenv(env))
 		if base == "" {
 			continue
 		}
-		dirs = append(dirs,
+		raw = append(raw,
 			filepath.Join(base, "FlyShadow"),
 			filepath.Join(base, "Programs", "FlyShadow"),
 		)
 	}
-	return dirs
+	return dedupeCleanPaths(raw, true)
+}
+
+func officialJarGlobsInDir(dir string) []string {
+	return []string{
+		filepath.Join(dir, "FlyShadow.jar"),
+		filepath.Join(dir, "FlyShadow-*.jar"),
+		filepath.Join(dir, "common-desktop-*.jar"),
+	}
 }
 
 func findOfficialJars() []string {
-	var patterns []string
+	var appDirs []string
 	switch runtime.GOOS {
 	case "darwin":
-		patterns = append(patterns, "/Applications/FlyShadow.app/Contents/app/common-desktop-*.jar")
+		appDirs = append(appDirs, "/Applications/FlyShadow.app/Contents/app")
 		if home, err := os.UserHomeDir(); err == nil {
-			patterns = append(patterns, filepath.Join(home, "Applications", "FlyShadow.app", "Contents", "app", "common-desktop-*.jar"))
+			appDirs = append(appDirs, filepath.Join(home, "Applications", "FlyShadow.app", "Contents", "app"))
 		}
 	case "windows":
-		for _, dir := range windowsInstallDirs() {
-			patterns = append(patterns, filepath.Join(dir, "app", "common-desktop-*.jar"))
-			patterns = append(patterns, filepath.Join(dir, "common-desktop-*.jar"))
+		for _, dir := range windowsInstallDirsFinder() {
+			appDirs = append(appDirs, filepath.Join(dir, "app"), dir)
 		}
 	}
+	return collectOfficialJarsFromDirs(appDirs)
+}
 
+// collectOfficialJarsFromDirs 在给定的官方应用目录集合中收集全部候选 JAR，去重后按修改时间降序排列。
+func collectOfficialJarsFromDirs(appDirs []string) []string {
 	var jars []string
-	for _, pat := range patterns {
-		matches, err := filepath.Glob(pat)
-		if err == nil {
-			jars = append(jars, matches...)
+	for _, dir := range appDirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		for _, pat := range officialJarGlobsInDir(dir) {
+			matches, err := filepath.Glob(pat)
+			if err == nil {
+				jars = append(jars, matches...)
+			}
 		}
 	}
+	jars = dedupeCleanPaths(jars, runtime.GOOS == "windows")
 	sort.Slice(jars, func(i, j int) bool {
 		si, ei := os.Stat(jars[i])
 		sj, ej := os.Stat(jars[j])
@@ -293,6 +326,28 @@ func findOfficialJars() []string {
 		return jars[i] < jars[j]
 	})
 	return jars
+}
+
+func dedupeCleanPaths(paths []string, caseInsensitive bool) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		cleaned := filepath.Clean(p)
+		key := cleaned
+		if caseInsensitive {
+			key = strings.ToLower(cleaned)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, cleaned)
+	}
+	return out
 }
 
 // findLatestVersionedLib 在 libRoot 下按版本号降序查找包含 targetFile 的最新版本目录。
@@ -362,6 +417,10 @@ func parseVersionParts(v string) []int {
 }
 
 func extractFromJarCached(jarPath, entryName, outFileName string) (string, error) {
+	return extractFirstFromJarCached(jarPath, []string{entryName}, outFileName)
+}
+
+func extractFirstFromJarCached(jarPath string, entryNames []string, outFileName string) (string, error) {
 	cacheDir, err := config.CacheDir()
 	if err != nil {
 		return "", err
@@ -375,20 +434,24 @@ func extractFromJarCached(jarPath, entryName, outFileName string) (string, error
 	}
 	defer zr.Close()
 
-	var target *zip.File
+	byName := make(map[string]*zip.File, len(zr.File))
 	for _, f := range zr.File {
-		if f.Name == entryName {
+		byName[f.Name] = f
+	}
+	var target *zip.File
+	for _, entryName := range entryNames {
+		if f, ok := byName[entryName]; ok {
 			target = f
 			break
 		}
 	}
 	if target == nil {
-		return "", fmt.Errorf("JAR 中未包含 %s", entryName)
+		return "", fmt.Errorf("JAR 中未包含 %s", strings.Join(entryNames, " / "))
 	}
 
 	// 使用 JAR 文件名 + 条目名 + CRC32 + 原始大小作为内容指纹，
 	// 避免官方客户端通过 DMG/安装包升级后 JAR 修改时间早于旧缓存而误判命中。
-	stamp := fmt.Sprintf("%s|%s|%08x|%d", filepath.Base(jarPath), entryName, target.CRC32, target.UncompressedSize64)
+	stamp := fmt.Sprintf("%s|%s|%08x|%d", filepath.Base(jarPath), target.Name, target.CRC32, target.UncompressedSize64)
 	if outInfo, err := os.Stat(outPath); err == nil && outInfo.Size() > 0 && outInfo.Size() == int64(target.UncompressedSize64) {
 		if saved, metaErr := os.ReadFile(metaPath); metaErr == nil && strings.TrimSpace(string(saved)) == stamp {
 			return outPath, nil
