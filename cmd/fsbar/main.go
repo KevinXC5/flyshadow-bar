@@ -3,9 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/applog"
+	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/ui"
 )
 
@@ -70,8 +73,35 @@ func runGUI(args []string) error {
 		return err
 	}
 
+	// 仅在使用默认主目录（未显式传入 --config 且未设置自定义目录环境变量）时，
+	// 自动完成从旧目录 ~/.FlyShadow 到独立主目录 ~/.flyshadowbar 的无损复制迁移。
+	var migReport config.MigrationReport
+	var migErr error
+	if strings.TrimSpace(*cfgPath) == "" {
+		migReport, migErr = config.EnsureMigrated()
+	}
+
+	if logPath, err := config.DefaultLogPath(); err == nil && logPath != "" {
+		if _, err := applog.Init(applog.Options{
+			FilePath:     logPath,
+			MirrorStderr: true,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "初始化程序日志失败 (%s): %v\n", logPath, err)
+		} else {
+			defer applog.Close()
+			defer applog.RecoverAndLog("gui")
+		}
+	}
+
+	if migErr != nil {
+		log.Printf("[config] 兼容迁移旧目录失败（不影响继续启动）: %v", migErr)
+	} else if migReport.CopiedConfig || migReport.CopiedPrefs {
+		log.Printf("[config] 已从旧目录迁移至独立主目录 %s (config=%v prefs=%v)",
+			migReport.TargetDir, migReport.CopiedConfig, migReport.CopiedPrefs)
+	}
+
 	startHidden := *hidden && !*show
-	return ui.Run(ui.RunOptions{
+	err := ui.Run(ui.RunOptions{
 		ConfigPath:          *cfgPath,
 		CoreLibPath:         *libPath,
 		StartHidden:         startHidden,
@@ -79,4 +109,8 @@ func runGUI(args []string) error {
 		NoConnect:           *noConnect,
 		DisableAutoSysProxy: *noAutoSys,
 	})
+	if err != nil {
+		log.Printf("[app] 启动或运行异常退出: %v", err)
+	}
+	return err
 }

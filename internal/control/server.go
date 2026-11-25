@@ -23,7 +23,7 @@ import (
 
 const runtimeFileName = "flyshadow-bar.run.json"
 
-// RuntimeInfo 写入 ~/.FlyShadow/flyshadow-bar.run.json，供 CLI 定位运行中的 GUI 实例。
+// RuntimeInfo 写入 ~/.flyshadowbar/flyshadow-bar.run.json，供 CLI 定位运行中的 GUI 实例。
 type RuntimeInfo struct {
 	PID       int    `json:"pid"`
 	Addr      string `json:"addr"`
@@ -32,7 +32,7 @@ type RuntimeInfo struct {
 	StartedAt int64  `json:"startedAt"`
 }
 
-// DefaultRuntimeFilePath 返回运行时发现文件路径。
+// DefaultRuntimeFilePath 返回运行时发现文件路径（默认 ~/.flyshadowbar/flyshadow-bar.run.json）。
 func DefaultRuntimeFilePath() (string, error) {
 	if custom := strings.TrimSpace(os.Getenv("FLYSHADOW_BAR_RUN_FILE")); custom != "" {
 		return custom, nil
@@ -177,15 +177,28 @@ func (s *Server) writeRuntimeFile() error {
 }
 
 // ReadRuntimeFile 读取运行中的实例发现信息。
+// 当未显式指定路径且新主目录 ~/.flyshadowbar 下尚无运行态文件时，回退探测旧目录 ~/.FlyShadow，
+// 确保在线更新重启前的过渡期新旧版本 CLI/GUI 仍可无缝通信。
 func ReadRuntimeFile(path string) (*RuntimeInfo, error) {
+	allowLegacyFallback := false
 	if path == "" {
 		var err error
 		path, err = DefaultRuntimeFilePath()
 		if err != nil {
 			return nil, err
 		}
+		allowLegacyFallback = strings.TrimSpace(os.Getenv("FLYSHADOW_BAR_RUN_FILE")) == "" && !config.HasCustomDirEnv()
 	}
 	data, err := os.ReadFile(path)
+	if err != nil && errors.Is(err, os.ErrNotExist) && allowLegacyFallback {
+		if legacyDir, lerr := config.LegacyDir(); lerr == nil {
+			legacyPath := filepath.Join(legacyDir, runtimeFileName)
+			if legacyData, rerr := os.ReadFile(legacyPath); rerr == nil {
+				data = legacyData
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -341,8 +341,38 @@ type AppPrefs struct {
 	UpdateRepo    string `json:"updateRepo,omitempty"`
 }
 
-// DefaultDir 返回 FlyShadow 配置目录（~/.FlyShadow）。
+const (
+	// AppDirName 是 FlyShadow Bar 独立的程序主目录名（位于用户主目录下）。
+	AppDirName = ".flyshadowbar"
+	// LegacyFlyShadowDirName 是原版 FlyShadow 客户端的数据目录名，仅用于首次迁移与只读查找官方核心库。
+	LegacyFlyShadowDirName = ".FlyShadow"
+	// PrefsFileName 是客户端轻量界面偏好文件名。
+	PrefsFileName = "flyshadow-bar.prefs.json"
+	// LogFileName 是程序滚动日志文件名。
+	LogFileName = "flyshadow-bar.log"
+)
+
+// MigrationReport 记录从旧目录（~/.FlyShadow）向独立主目录（~/.flyshadowbar）的兼容迁移结果。
+type MigrationReport struct {
+	LegacyDir     string
+	TargetDir     string
+	CopiedConfig  bool
+	CopiedPrefs   bool
+	SkippedCustom bool
+}
+
+// HasCustomDirEnv 判断是否通过环境变量显式指定了自定义目录或配置路径。
+func HasCustomDirEnv() bool {
+	return strings.TrimSpace(os.Getenv("FLYSHADOW_BAR_DIR")) != "" ||
+		strings.TrimSpace(os.Getenv("FLYSHADOW_CONFIG_DIR")) != "" ||
+		strings.TrimSpace(os.Getenv("FLYSHADOW_CONFIG_PATH")) != ""
+}
+
+// DefaultDir 返回 FlyShadow Bar 独立程序主目录（默认 ~/.flyshadowbar）。
 func DefaultDir() (string, error) {
+	if custom := strings.TrimSpace(os.Getenv("FLYSHADOW_BAR_DIR")); custom != "" {
+		return custom, nil
+	}
 	if custom := strings.TrimSpace(os.Getenv("FLYSHADOW_CONFIG_DIR")); custom != "" {
 		return custom, nil
 	}
@@ -350,10 +380,40 @@ func DefaultDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("获取用户主目录失败: %w", err)
 	}
-	return filepath.Join(home, ".FlyShadow"), nil
+	return filepath.Join(home, AppDirName), nil
 }
 
-// DefaultConfigPath 返回默认配置文件路径 ~/.FlyShadow/config.json。
+// LegacyDir 返回原版 FlyShadow 目录（~/.FlyShadow），仅作只读查找与兼容迁移来源。
+func LegacyDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("获取用户主目录失败: %w", err)
+	}
+	return filepath.Join(home, LegacyFlyShadowDirName), nil
+}
+
+// CacheDir 返回 FlyShadow Bar 自身的解压缓存目录（~/.flyshadowbar/cache）。
+func CacheDir() (string, error) {
+	dir, err := DefaultDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "cache"), nil
+}
+
+// DefaultLogPath 返回程序日志文件路径（默认 ~/.flyshadowbar/logs/flyshadow-bar.log）。
+func DefaultLogPath() (string, error) {
+	if custom := strings.TrimSpace(os.Getenv("FLYSHADOW_BAR_LOG_FILE")); custom != "" {
+		return custom, nil
+	}
+	dir, err := DefaultDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "logs", LogFileName), nil
+}
+
+// DefaultConfigPath 返回默认配置文件路径 ~/.flyshadowbar/config.json。
 func DefaultConfigPath() (string, error) {
 	if custom := strings.TrimSpace(os.Getenv("FLYSHADOW_CONFIG_PATH")); custom != "" {
 		return custom, nil
@@ -365,13 +425,102 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(dir, "config.json"), nil
 }
 
-// DefaultPrefsPath 返回 flyshadow-bar 自身偏好文件路径。
+// DefaultPrefsPath 返回 flyshadow-bar 自身偏好文件路径 ~/.flyshadowbar/flyshadow-bar.prefs.json。
 func DefaultPrefsPath() (string, error) {
 	dir, err := DefaultDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "flyshadow-bar.prefs.json"), nil
+	return filepath.Join(dir, PrefsFileName), nil
+}
+
+// EnsureMigrated 确保独立主目录 ~/.flyshadowbar 已初始化；
+// 若用户是从旧版本在线更新或曾使用过原版 FlyShadow，自动将 ~/.FlyShadow 中的配置与界面偏好
+// 无损复制到 ~/.flyshadowbar（绝不删除、不修改旧目录，且不覆盖新目录中已存在的文件）。
+// 当检测到显式自定义目录/配置环境变量时自动跳过，避免干扰隔离测试环境。
+func EnsureMigrated() (MigrationReport, error) {
+	if HasCustomDirEnv() {
+		dir, _ := DefaultDir()
+		return MigrationReport{TargetDir: dir, SkippedCustom: true}, nil
+	}
+	targetDir, err := DefaultDir()
+	if err != nil {
+		return MigrationReport{}, err
+	}
+	legacyDir, err := LegacyDir()
+	if err != nil {
+		return MigrationReport{TargetDir: targetDir}, nil
+	}
+	return MigrateFromLegacy(legacyDir, targetDir)
+}
+
+// MigrateFromLegacy 将 legacyDir 中属于本客户端的配置与偏好安全复制到 targetDir。
+func MigrateFromLegacy(legacyDir, targetDir string) (MigrationReport, error) {
+	report := MigrationReport{
+		LegacyDir: legacyDir,
+		TargetDir: targetDir,
+	}
+	if strings.TrimSpace(targetDir) == "" {
+		return report, errors.New("目标主目录不能为空")
+	}
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return report, fmt.Errorf("创建程序主目录失败 (%s): %w", targetDir, err)
+	}
+	if strings.TrimSpace(legacyDir) == "" || filepath.Clean(legacyDir) == filepath.Clean(targetDir) {
+		return report, nil
+	}
+	if st, err := os.Stat(legacyDir); err != nil || !st.IsDir() {
+		return report, nil
+	}
+
+	copiedCfg, err := copyFileIfMissing(
+		filepath.Join(legacyDir, "config.json"),
+		filepath.Join(targetDir, "config.json"),
+		0o600,
+	)
+	if err != nil {
+		return report, fmt.Errorf("迁移配置文件失败: %w", err)
+	}
+	report.CopiedConfig = copiedCfg
+
+	copiedPrefs, err := copyFileIfMissing(
+		filepath.Join(legacyDir, PrefsFileName),
+		filepath.Join(targetDir, PrefsFileName),
+		0o600,
+	)
+	if err != nil {
+		return report, fmt.Errorf("迁移界面偏好失败: %w", err)
+	}
+	report.CopiedPrefs = copiedPrefs
+
+	return report, nil
+}
+
+// copyFileIfMissing 仅在 dst 不存在且 src 为非空普通文件时执行原子复制。
+func copyFileIfMissing(src, dst string, perm os.FileMode) (bool, error) {
+	if _, err := os.Stat(dst); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	st, err := os.Stat(src)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if st.IsDir() || st.Size() == 0 {
+		return false, nil
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return false, err
+	}
+	if err := atomicWriteFile(dst, data, perm); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Load 读取并解析 FlyShadow 的 config.json，同时保留全部未知字段的原始 JSON。

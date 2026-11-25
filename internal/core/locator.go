@@ -98,15 +98,27 @@ func locateDarwinCoreLib() (string, error) {
 		}
 	}
 
-	// 2. ~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib
+	// 2. ~/.flyshadowbar/lib/<最新版本> 及 ~/.flyshadowbar/cache
 	if dir, err := config.DefaultDir(); err == nil {
 		if p, ok := findLatestVersionedLib(filepath.Join(dir, "lib"), DarwinLibName); ok {
 			return p, nil
 		}
 	}
-
-	// 3. 从 /Applications/FlyShadow.app/Contents/app/common-desktop-*.jar 自动解压（按当前架构选择）
 	cacheFileName := fmt.Sprintf("darwin-%s-%s", runtime.GOARCH, DarwinLibName)
+	if cacheDir, err := config.CacheDir(); err == nil {
+		if p := filepath.Join(cacheDir, cacheFileName); isRegularFile(p) {
+			return p, nil
+		}
+	}
+
+	// 3. 只读兼容原版 ~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib
+	if legacyDir, err := config.LegacyDir(); err == nil {
+		if p, ok := findLatestVersionedLib(filepath.Join(legacyDir, "lib"), DarwinLibName); ok {
+			return p, nil
+		}
+	}
+
+	// 4. 从 /Applications/FlyShadow.app/Contents/app/common-desktop-*.jar 自动解压并缓存至 ~/.flyshadowbar/cache
 	for _, jarPath := range findOfficialJars() {
 		for _, entry := range darwinJarEntries(runtime.GOARCH) {
 			if extracted, err := extractFromJarCached(jarPath, entry, cacheFileName); err == nil {
@@ -115,7 +127,7 @@ func locateDarwinCoreLib() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("未找到 %s（已检查程序目录、~/.FlyShadow/lib 与 /Applications/FlyShadow.app）", DarwinLibName)
+	return "", fmt.Errorf("未找到 %s（已检查程序目录、~/.flyshadowbar、~/.FlyShadow/lib 与 /Applications/FlyShadow.app）", DarwinLibName)
 }
 
 func locateWindowsCoreLib() (string, error) {
@@ -127,14 +139,26 @@ func locateWindowsCoreLib() (string, error) {
 		}
 	}
 
-	// 2. %USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll
+	// 2. %USERPROFILE%\.flyshadowbar\lib\<最新版本> 及 cache
 	if dir, err := config.DefaultDir(); err == nil {
 		if p, ok := findLatestVersionedLib(filepath.Join(dir, "lib"), WindowsLibName); ok {
 			return p, nil
 		}
 	}
+	if cacheDir, err := config.CacheDir(); err == nil {
+		if p := filepath.Join(cacheDir, WindowsLibName); isRegularFile(p) {
+			return p, nil
+		}
+	}
 
-	// 3. Windows 常见安装目录
+	// 3. 只读兼容原版 %USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll
+	if legacyDir, err := config.LegacyDir(); err == nil {
+		if p, ok := findLatestVersionedLib(filepath.Join(legacyDir, "lib"), WindowsLibName); ok {
+			return p, nil
+		}
+	}
+
+	// 4. Windows 常见安装目录
 	for _, dir := range windowsInstallDirs() {
 		for _, sub := range []string{"", "app", "lib", "resources"} {
 			p := filepath.Join(dir, sub, WindowsLibName)
@@ -144,14 +168,14 @@ func locateWindowsCoreLib() (string, error) {
 		}
 	}
 
-	// 4. 从安装目录内的 common-desktop-*.jar 提取
+	// 5. 从安装目录内的 common-desktop-*.jar 提取并缓存至 %USERPROFILE%\.flyshadowbar\cache
 	for _, jarPath := range findOfficialJars() {
 		if extracted, err := extractFromJarCached(jarPath, WindowsJarEntry, WindowsLibName); err == nil {
 			return extracted, nil
 		}
 	}
 
-	return "", fmt.Errorf("未找到 %s（已检查程序目录、%%USERPROFILE%%\\.FlyShadow\\lib 与 FlyShadow 常见安装目录）", WindowsLibName)
+	return "", fmt.Errorf("未找到 %s（已检查程序目录、%%USERPROFILE%%\\.flyshadowbar、%%USERPROFILE%%\\.FlyShadow\\lib 与 FlyShadow 常见安装目录）", WindowsLibName)
 }
 
 func executableCandidateDirs() []string {
@@ -179,7 +203,15 @@ func commonAssetDirs() []string {
 		dirs = append(dirs,
 			cfgDir,
 			filepath.Join(cfgDir, "geoip"),
-			filepath.Join(cfgDir, "flyshadow-bar-cache"),
+			filepath.Join(cfgDir, "cache"),
+		)
+	}
+	// 只读兼容原版 ~/.FlyShadow 中已有的 GeoIP 文件
+	if legacyDir, err := config.LegacyDir(); err == nil {
+		dirs = append(dirs,
+			legacyDir,
+			filepath.Join(legacyDir, "geoip"),
+			filepath.Join(legacyDir, "flyshadow-bar-cache"),
 		)
 	}
 	return dirs
@@ -293,11 +325,10 @@ func parseVersionParts(v string) []int {
 }
 
 func extractFromJarCached(jarPath, entryName, outFileName string) (string, error) {
-	cfgDir, err := config.DefaultDir()
+	cacheDir, err := config.CacheDir()
 	if err != nil {
 		return "", err
 	}
-	cacheDir := filepath.Join(cfgDir, "flyshadow-bar-cache")
 	outPath := filepath.Join(cacheDir, outFileName)
 
 	jarInfo, err := os.Stat(jarPath)

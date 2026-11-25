@@ -34,7 +34,7 @@ func TestReleaseNotesSince(t *testing.T) {
 
 func TestUpdateManagerCheckInstallRestart(t *testing.T) {
 	restarted := false
-	mgr := newUpdateManager(func() { restarted = true })
+	mgr := newUpdateManager(func() { restarted = true }, nil)
 	mgr.versionFn = func() string { return "0.1.0" }
 	mgr.enabledFn = func() bool { return true }
 	mgr.checkFn = func(context.Context) (*mygo.Update, error) {
@@ -80,7 +80,7 @@ func TestUpdateManagerCheckInstallRestart(t *testing.T) {
 }
 
 func TestUpdateManagerDisabledAndCancel(t *testing.T) {
-	mgr := newUpdateManager(nil)
+	mgr := newUpdateManager(nil, nil)
 	mgr.enabledFn = func() bool { return false }
 	if _, err := mgr.Check(context.Background()); !errors.Is(err, mygo.ErrUpdatesDisabled) {
 		t.Fatalf("禁用时应返回 ErrUpdatesDisabled, got=%v", err)
@@ -113,7 +113,7 @@ func TestUpdateManagerDisabledAndCancel(t *testing.T) {
 }
 
 func TestDirUpdateSource(t *testing.T) {
-	if _, err := newDirUpdateSource("http://example.com/updates", "darwin", "arm64"); err == nil {
+	if _, err := newDirUpdateSource("http://example.com/updates", "darwin", "arm64", nil); err == nil {
 		t.Fatalf("非本机回环的明文 http 源应被拒绝")
 	}
 
@@ -124,7 +124,7 @@ func TestDirUpdateSource(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src, err := newDirUpdateSource(srv.URL, "darwin", "arm64")
+	src, err := newDirUpdateSource(srv.URL, "darwin", "arm64", nil)
 	if err != nil {
 		t.Fatalf("newDirUpdateSource 失败: %v", err)
 	}
@@ -149,11 +149,32 @@ func TestDirUpdateSource(t *testing.T) {
 	}
 }
 
+func TestBuildUpdateRoutesPriorityAndLoopback(t *testing.T) {
+	// 公网 HTTPS 请求在内置代理可用时，必须按 local-proxy -> system-proxy -> direct 顺序回退
+	routes := buildUpdateRoutes("https://github.com/KevinXC5/flyshadow-bar/releases/latest/download/update-windows-amd64.json", "http://127.0.0.1:7890", 10*time.Second)
+	if len(routes) != 3 || routes[0].name != "local-proxy" || routes[1].name != "system-proxy" || routes[2].name != "direct" {
+		t.Fatalf("unexpected routes order: %+v", routes)
+	}
+
+	// 内置代理未连接时仅保留 system-proxy -> direct
+	routesNoLocal := buildUpdateRoutes("https://github.com/KevinXC5/flyshadow-bar/releases/latest/download/update-windows-amd64.json", "", 10*time.Second)
+	if len(routesNoLocal) != 2 || routesNoLocal[0].name != "system-proxy" || routesNoLocal[1].name != "direct" {
+		t.Fatalf("unexpected routes without local proxy: %+v", routesNoLocal)
+	}
+
+	// 回环地址仅直连
+	loopRoutes := buildUpdateRoutes("http://127.0.0.1:18080/update-darwin-arm64.json", "http://127.0.0.1:7890", 10*time.Second)
+	if len(loopRoutes) != 1 || loopRoutes[0].name != "direct" {
+		t.Fatalf("loopback URL should only use direct route: %+v", loopRoutes)
+	}
+}
+
 func TestUpdateManagerAutoDownloadReady(t *testing.T) {
-	mgr := newUpdateManager(nil)
+	mgr := newUpdateManager(nil, nil)
 	mgr.versionFn = func() string { return "0.2.0" }
 	mgr.enabledFn = func() bool { return true }
 	mgr.initialDelay = 10 * time.Millisecond
+	mgr.retryDelay = 15 * time.Millisecond
 	mgr.checkInterval = 20 * time.Millisecond
 	mgr.checkFn = func(context.Context) (*mygo.Update, error) {
 		return &mygo.Update{Version: "0.2.2", Notes: "### 0.2.2\n\n自动静默增量更新"}, nil
@@ -179,5 +200,44 @@ func TestUpdateManagerAutoDownloadReady(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("等待后台自动增量更新就绪超时")
+	}
+}
+
+func TestUpdateManagerEarlyRetryAfterInitialFailure(t *testing.T) {
+	mgr := newUpdateManager(nil, nil)
+	mgr.versionFn = func() string { return "0.2.9" }
+	mgr.enabledFn = func() bool { return true }
+	mgr.initialDelay = 10 * time.Millisecond
+	mgr.retryDelay = 20 * time.Millisecond
+	mgr.checkInterval = 5 * time.Second
+
+	attempts := 0
+	mgr.checkFn = func(context.Context) (*mygo.Update, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("tunnel still connecting")
+		}
+		return &mygo.Update{Version: "0.2.10"}, nil
+	}
+	mgr.installFn = func(_ context.Context, _ *mygo.Update, _ func(int64, int64)) error {
+		return nil
+	}
+
+	readyCh := make(chan UpdateStatus, 1)
+	mgr.readyFn = func(st UpdateStatus) {
+		readyCh <- st
+	}
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	mgr.StartBackground(stopCh)
+
+	select {
+	case st := <-readyCh:
+		if !st.Installed || attempts < 2 {
+			t.Fatalf("期望首轮失败后快速重试成功: st=%+v attempts=%d", st, attempts)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("首轮失败后未按 retryDelay 触发快速重试")
 	}
 }

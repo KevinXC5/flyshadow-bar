@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/egoist/mygo/netproxy"
 
 	"github.com/KevinXC5/flyshadow-bar/internal/version"
 )
@@ -51,8 +55,14 @@ type githubAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// Check 查询 GitHub 最新 Release 并判断是否需要更新。
+// Check 查询 GitHub 最新 Release 并判断是否需要更新（自动走系统/环境代理并回退直连）。
 func Check(ctx context.Context, repo string, currentVersion string) (*CheckResult, error) {
+	return CheckWithProxy(ctx, repo, currentVersion, "")
+}
+
+// CheckWithProxy 查询 GitHub 最新 Release；提供 localProxyURL 时优先经由本机内置代理访问，
+// 失败自动回退系统代理与直连，无需依赖操作系统全局代理开关。
+func CheckWithProxy(ctx context.Context, repo string, currentVersion string, localProxyURL string) (*CheckResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -71,15 +81,12 @@ func Check(ctx context.Context, repo string, currentVersion string) (*CheckResul
 	}
 
 	endpoint := fmt.Sprintf("%s/repos/%s/releases/latest", strings.TrimRight(APIBaseURL, "/"), repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("构造更新检查请求失败: %w", err)
+	headers := map[string]string{
+		"User-Agent": userAgent,
+		"Accept":     githubAccept,
 	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", githubAccept)
 
-	client := &http.Client{Timeout: checkTimeout}
-	resp, err := client.Do(req)
+	resp, err := doGetWithFallback(ctx, endpoint, headers, localProxyURL, checkTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("请求 GitHub 更新接口失败: %w", err)
 	}
@@ -287,6 +294,11 @@ func isAllDigits(s string) bool {
 
 // DownloadAsset 下载发布包到指定路径，并通过临时文件原子替换避免残缺文件。
 func DownloadAsset(ctx context.Context, downloadURL, destPath string, onProgress func(downloaded, total int64)) error {
+	return DownloadAssetWithProxy(ctx, downloadURL, destPath, "", onProgress)
+}
+
+// DownloadAssetWithProxy 下载发布包到指定路径；提供 localProxyURL 时优先经由本机内置代理访问并自动回退。
+func DownloadAssetWithProxy(ctx context.Context, downloadURL, destPath, localProxyURL string, onProgress func(downloaded, total int64)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -305,13 +317,7 @@ func DownloadAsset(ctx context.Context, downloadURL, destPath string, onProgress
 		return fmt.Errorf("创建目标目录失败: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return fmt.Errorf("构造下载请求失败: %w", err)
-	}
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doGetWithFallback(ctx, downloadURL, map[string]string{"User-Agent": userAgent}, localProxyURL, 30*time.Second)
 	if err != nil {
 		return fmt.Errorf("下载更新资源失败: %w", err)
 	}
@@ -514,4 +520,68 @@ func matchesArch(lowerName string, tokens map[string]struct{}, goarch string) bo
 func hasAnyKnownArch(lowerName string, tokens map[string]struct{}) bool {
 	return hasAnyToken(tokens, "amd64", "x64", "arm64", "aarch64", "386", "i386", "i686", "x86", "armv7", "arm", "riscv64", "ppc64le", "s390x") ||
 		strings.Contains(lowerName, "x86_64") || strings.Contains(lowerName, "x86-64")
+}
+
+func doGetWithFallback(ctx context.Context, rawURL string, headers map[string]string, localProxyURL string, headerTimeout time.Duration) (*http.Response, error) {
+	transports := buildTransports(rawURL, localProxyURL, headerTimeout)
+	var lastErr error
+	for _, tr := range transports {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		client := &http.Client{Transport: tr}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return resp, nil
+	}
+	return nil, lastErr
+}
+
+func buildTransports(rawURL, localProxyURL string, headerTimeout time.Duration) []*http.Transport {
+	if isLoopbackURL(rawURL) {
+		return []*http.Transport{cloneTransport(nil, headerTimeout)}
+	}
+	var out []*http.Transport
+	if rawProxy := strings.TrimSpace(localProxyURL); rawProxy != "" {
+		if parsed, err := url.Parse(rawProxy); err == nil && parsed.Host != "" {
+			out = append(out, cloneTransport(http.ProxyURL(parsed), headerTimeout))
+		}
+	}
+	sysTr := netproxy.Transport().Clone()
+	sysTr.ResponseHeaderTimeout = headerTimeout
+	out = append(out, sysTr)
+	out = append(out, cloneTransport(nil, headerTimeout))
+	return out
+}
+
+func cloneTransport(proxyFn func(*http.Request) (*url.URL, error), headerTimeout time.Duration) *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = proxyFn
+	tr.DialContext = (&net.Dialer{
+		Timeout:   8 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	tr.TLSHandshakeTimeout = 10 * time.Second
+	tr.ResponseHeaderTimeout = headerTimeout
+	return tr
+}
+
+func isLoopbackURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

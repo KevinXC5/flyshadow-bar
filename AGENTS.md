@@ -13,8 +13,8 @@
 ## 隐私与安全底线
 
 - 严禁在代码、测试、日志、终端输出、截图、文档或 Git 提交中暴露任何真实节点地址（host）、密码、订阅链接、账号 token、私人分组名或第三方 API Key。
-- 涉及对外展示或提交仓库的截图，必须使用完全虚构的脱敏测试配置（模拟节点、规则与连接数据），严禁截取用户真实 `~/.FlyShadow/config.json` 界面。
-- 本地功能验证、代理实测或运行 `FLYSHADOW_LIVE_TEST=1` 时，必须使用临时目录配置与随机/隔离高端口，并设置 `--no-auto-sysproxy`（或 `DisableAutoSysProxy: true`），严禁修改用户真实的 `~/.FlyShadow/config.json`、系统代理设置或占用宿主机正在运行的代理端口（如 `7890`）。
+- 涉及对外展示或提交仓库的截图，必须使用完全虚构的脱敏测试配置（模拟节点、规则与连接数据），严禁截取用户真实 `~/.flyshadowbar/config.json` 或 `~/.FlyShadow/config.json` 界面。
+- 本地功能验证、代理实测或运行 `FLYSHADOW_LIVE_TEST=1` 时，必须使用临时目录配置（设置 `FLYSHADOW_BAR_DIR` 或 `--config`）与随机/隔离高端口，并设置 `--no-auto-sysproxy`（或 `DisableAutoSysProxy: true`），严禁修改用户真实的 `~/.flyshadowbar/config.json`、`~/.FlyShadow/config.json`、系统代理设置或占用宿主机正在运行的代理端口（如 `7890`）。
 
 ## 架构与构建约束
 
@@ -22,13 +22,15 @@
 - **纯 Go 原生 GPU UI 与 MyGo 打包**：桌面端基于 `github.com/egoist/mygo`（macOS Metal / Windows Direct3D 11）与原生系统托盘实现，严禁引入 Electron、WebView、Node.js 或网页前端构建链。MyGo CLI 由 `go.mod` 的 `tool` 指令固定，通过 `go tool mygo` 调用，应用图标（`resources/icon.png`，通过 `resourcesExclude` 排除冗余原图拷贝）、打包与增量更新元数据配置在 `mygo.json`。正式版本号由发版流程从 Git 标签注入 `mygo.json`，仓库内 `mygo.json` 的 `version` 仅用于本地开发构建。
 - **菜单栏 / 托盘弹窗与跨平台一致性**：启动默认静默驻留托盘并按需懒创建主窗口（仅传 `--show` 时启动弹窗）；主窗口顶部标题栏左上角使用裁剪自 `resources/icon.png` 的内嵌高清应用 Logo（`internal/ui/assets/logo.png`）；主窗口使用 `TitleBarStyle: mygo.TitleBarHidden` + `HideWindowButtons: true` + `SkipTaskbar: true` + `AlwaysOnTop: true`（在 macOS 隐藏红绿灯、在 Windows 隐藏标题按钮的同时保留双端原生圆角与阴影），点击托盘图标在图标附近弹出/收起，支持 `Esc` 与失焦自动收起（更新下载中、模态弹窗打开及 `--show` 模式不自动收起）；macOS 菜单栏图标**严格使用纯黑透明模板图（`IconIsTemplate: true`，零彩色像素）**由系统随浅/深菜单栏自动切换黑白色，严禁使用彩色原生图标；macOS 保持常驻 `Menu: nil` 并在 `OnRightClick` 临时弹出快捷菜单，Windows 保持 `Menu` 绑定且 `OnClick` 弹窗，确保双端左键弹窗、右键菜单行为完全一致。
 - **命令行自动链接 PATH**：`internal/cliinstall` 在正式安装形态运行（非临时目录、非 `/Volumes/` DMG 挂载卷）时自动将 `fsbar` 链接到对应 `PATH` 目录（macOS 优先原地更新已有己方软链，否则按 `/usr/local/bin` → `/opt/homebrew/bin` → `~/.local/bin` 自动建链且不覆盖非己方文件；Windows 通过 `packaging/windows/installer.nsh` 与运行时兜底生成 `fsbar.cmd` 并写入 `HKCU\Environment\Path`，卸载时清理），同时提供 `fsbar install-cli` 与设置页一键重新链接。
-- **自动静默增量更新**：`internal/ui/updates.go` 在启动 5 秒后首次检查并每 30 分钟周期性静默检查，发现新版本后自动在后台下载并安装签名 `.delta` 补丁，安装就绪后通过弹窗顶部醒目横幅（`renderUpdateReadyBanner`）与托盘菜单提示一键重启生效。
+- **独立程序主目录与兼容迁移**：默认使用 `~/.flyshadowbar`（Windows 为 `%USERPROFILE%\.flyshadowbar`，支持 `FLYSHADOW_BAR_DIR` 覆盖、兼容 `FLYSHADOW_CONFIG_DIR`）存放 `config.json`、`flyshadow-bar.prefs.json`、`flyshadow-bar.run.json`、`cache/` 与 `logs/flyshadow-bar.log`；严禁向原版 `~/.FlyShadow` 写入任何文件。启动时若未显式指定自定义目录/配置路径，`config.EnsureMigrated()` 会将旧目录 `~/.FlyShadow` 中的 `config.json` 与 `flyshadow-bar.prefs.json` 原子复制至 `~/.flyshadowbar`（不覆盖已有文件、不删除旧文件）；核心库与 GeoIP 查找仍对 `~/.FlyShadow/lib` 保持只读兼容，`control.ReadRuntimeFile` 对 `~/.FlyShadow/flyshadow-bar.run.json` 保持过渡期回退读取。
+- **自动静默增量更新与代理回退**：`internal/ui/updates.go` 在启动 5 秒后首次检查（若启动初轮失败 30 秒后补检一次）并每 30 分钟周期性静默检查；通过自定义 `mygo.UpdateSource` 优先经由本机内置混合代理访问更新源并自动回退系统代理与直连（未开系统代理同样可更新，且强制 Ed25519 公钥验签），安装就绪后通过弹窗顶部醒目横幅（`renderUpdateReadyBanner`）与托盘菜单提示一键重启生效。
 - **切勿覆盖 `mygo.App.Version()`**：`mygo build` 通过 `-ldflags` 注入当前版本号供 `mygo.Updater` 匹配增量补丁；启动时仅在 `mygo.App.Version()` 为空或 `"0.0.0"` 时才回退调用 `mygo.App.SetVersion`。
-- **单二进制双形态（CLI 名称 `fsbar`）**：入口位于 `cmd/fsbar/`，无参数或仅带 GUI 标志（`--gui`/`--hidden`/`--config`/`--core-lib`/`--no-connect`/`--no-auto-sysproxy`/`-psn_*`）时启动常驻 GUI；携带子命令时通过本地回环 Bearer Token 控制接口（`~/.FlyShadow/flyshadow-bar.run.json`，权限 `0600`）与运行中实例通信，且所有子命令均支持 `fsbar help <子命令>` 与 `--help`。
+- **单二进制双形态（CLI 名称 `fsbar`）**：入口位于 `cmd/fsbar/`，无参数或仅带 GUI 标志（`--gui`/`--hidden`/`--config`/`--core-lib`/`--no-connect`/`--no-auto-sysproxy`/`-psn_*`）时启动常驻 GUI；携带子命令时通过本地回环 Bearer Token 控制接口（`~/.flyshadowbar/flyshadow-bar.run.json`，权限 `0600`）与运行中实例通信，且所有子命令均支持 `fsbar help <子命令>` 与 `--help`。
 - **包职责划分**：
+  - `internal/applog`：自动滚动程序日志（`~/.flyshadowbar/logs/flyshadow-bar.log`，5 MiB × 3 备份、敏感凭据兜底脱敏、panic 堆栈捕获与尾部读取）。
   - `internal/cliinstall`：跨平台命令行工具 `fsbar` 自动链接/注册到系统 `PATH` 目录与冲突保护。
   - `internal/cloud`：官方云端订阅与自定义分流规则双向同步客户端（DoH TXT 发现、代理/直连自动回退、凭据脱敏）。
-  - `internal/config`：无损配置加载/保存、节点匹配、13 种官方分流规则与自定义规则 CRUD、客户端独立偏好 `flyshadow-bar.prefs.json`。
+  - `internal/config`：独立主目录 `~/.flyshadowbar` 管理与旧目录无损迁移、无损配置加载/保存、节点匹配、13 种官方分流规则与自定义规则 CRUD、客户端独立偏好 `flyshadow-bar.prefs.json`。
   - `internal/core`：零 CGO FFI 绑定（macOS `purego`、Windows `golang.org/x/sys/windows`）、核心动态库与 GeoIP 自动定位及 JAR 解压缓存。
   - `internal/sysproxy`：跨平台系统代理（macOS `networksetup`、Windows 注册表 + `wininet.dll`）。
   - `internal/engine`：单进程运行时引擎（隧道热切换、规则热重载不中断隧道、并发测速、1s 流量采样、连接监控、启动自动代理与退出清理）。

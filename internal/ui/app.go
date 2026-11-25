@@ -10,6 +10,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/applog"
 	"github.com/KevinXC5/flyshadow-bar/internal/cliinstall"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/control"
@@ -59,6 +60,7 @@ func Run(opts RunOptions) error {
 	}
 
 	if !mygo.App.RequestSingleInstanceLock() {
+		log.Printf("[app] 检测到已有 FlyShadow Bar 实例在运行，唤醒现有实例后退出")
 		return nil
 	}
 
@@ -66,6 +68,9 @@ func Run(opts RunOptions) error {
 	if runtime.GOOS == "darwin" {
 		mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
 	}
+
+	log.Printf("[app] 启动 FlyShadow Bar: version=%s os=%s/%s startHidden=%v showOnce=%v noConnect=%v noAutoSysProxy=%v",
+		version.Version, runtime.GOOS, runtime.GOARCH, opts.StartHidden, opts.ShowOnceOnStart, opts.NoConnect, opts.DisableAutoSysProxy)
 
 	prefs := config.LoadAppPrefs("")
 	applyThemeSource(prefs.ThemeMode)
@@ -76,6 +81,7 @@ func Run(opts RunOptions) error {
 		DisableAutoSysProxy: opts.DisableAutoSysProxy,
 	})
 	if err != nil {
+		log.Printf("[app] 初始化引擎失败: %v", err)
 		return fmt.Errorf("初始化 FlyShadow 引擎失败: %w", err)
 	}
 
@@ -86,13 +92,14 @@ func Run(opts RunOptions) error {
 	}
 	app.updates = newUpdateManager(func() {
 		mygo.RunOnMain(func() {
+			log.Printf("[updater] 正在重启以应用新版本")
 			app.quitting = true
 			// 先挂起脱离当前进程组的 macOS 重启看门狗，再交由 MyGo 正常走完退出、换包与拉起流程
 			// （cleanup 由 OnWillQuit / OnQuit 统一执行，避免提前清理干扰退出事件循环）
 			armRelaunchWatchdog("--relaunch")
 			mygo.App.Relaunch("--relaunch")
 		})
-	})
+	}, eng.LocalProxyURL)
 
 	// 启动本地控制服务（供 CLI 与 SSH 终端操作运行中的实例）
 	ctrlSrv, err := control.StartServer(eng, control.ServerOptions{
@@ -104,9 +111,11 @@ func Run(opts RunOptions) error {
 		},
 	})
 	if err != nil {
+		log.Printf("[app] 启动本地控制服务失败: %v", err)
 		eng.Shutdown()
 		return fmt.Errorf("启动本地控制服务失败: %w", err)
 	}
+	log.Printf("[app] 本地控制服务已就绪: addr=%s", ctrlSrv.Addr())
 	app.ctrl = ctrlSrv
 
 	// 再次启动同一二进制时唤醒主窗口
@@ -612,6 +621,31 @@ func (a *App) installCLILink() {
 				a.vm.toastMsg = "命令行工具 fsbar 已就绪"
 			}
 		})
+	}()
+}
+
+func (a *App) logFilePath() string {
+	if p := applog.CurrentPath(); p != "" {
+		return p
+	}
+	p, _ := config.DefaultLogPath()
+	return p
+}
+
+func (a *App) openLogDirectory() {
+	p := a.logFilePath()
+	if p == "" {
+		return
+	}
+	go func() {
+		if err := revealPathInFileManager(p); err != nil {
+			log.Printf("[app] 打开日志目录失败 (%s): %v", p, err)
+			a.updateWindow(func() {
+				if a.vm != nil {
+					a.vm.toastMsg = "打开日志目录失败: " + err.Error()
+				}
+			})
+		}
 	}()
 }
 

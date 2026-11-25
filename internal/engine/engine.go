@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -208,6 +210,8 @@ func New(opts Options) (*Engine, error) {
 		cli.SetGeoIP("CN", geoData)
 		e.geoIPLoaded = true
 		e.geoIPPath = geoPath
+	} else if err != nil {
+		log.Printf("[engine] 未加载 GeoIP 数据库: %v", err)
 	}
 
 	e.applyConfigToCoreLocked()
@@ -216,6 +220,9 @@ func New(opts Options) (*Engine, error) {
 	if enabled, err := sp.IsEnabled("127.0.0.1", cfg.ProxyPort); err == nil {
 		e.systemProxyOn = enabled
 	}
+
+	log.Printf("[engine] 初始化完成: config=%s core=%s (%s) geoip=%v rules=%d nodes=%d port=%d mode=%s sysproxy=%v",
+		cfg.Path, cli.Version(), cli.LibPath(), e.geoIPLoaded, e.ruleCount, len(cfg.Nodes()), cfg.ProxyPort, core.ProxyMode(cfg.ProxyType).String(), e.systemProxyOn)
 
 	return e, nil
 }
@@ -255,7 +262,10 @@ func (e *Engine) Start(autoConnect bool) error {
 				e.mu.Lock()
 				e.systemProxyOn = true
 				e.mu.Unlock()
+				log.Printf("[engine] 启动建连后已自动开启系统代理: 127.0.0.1:%d", port)
 				e.emit()
+			} else {
+				log.Printf("[engine] 启动自动开启系统代理失败 (127.0.0.1:%d): %v", port, err)
 			}
 		}
 		// 首次建连后若配置包含订阅凭据且距上次同步超过 5 分钟，后台静默刷新流量、到期时间、节点与云端规则
@@ -289,7 +299,11 @@ func (e *Engine) Shutdown() {
 		wasOn := e.systemProxyOn
 		e.mu.RUnlock()
 		if wasOn {
-			_ = e.sysProxy.Disable()
+			if err := e.sysProxy.Disable(); err != nil {
+				log.Printf("[engine] 退出关闭系统代理失败: %v", err)
+			} else {
+				log.Printf("[engine] 退出已自动关闭系统代理")
+			}
 			e.mu.Lock()
 			e.systemProxyOn = false
 			e.mu.Unlock()
@@ -299,6 +313,7 @@ func (e *Engine) Shutdown() {
 	if e.core != nil {
 		e.core.Close()
 	}
+	log.Printf("[engine] 运行时引擎已停止")
 
 	e.mu.Lock()
 	e.state = StateDisconnected
@@ -590,9 +605,11 @@ func (e *Engine) SetSystemProxy(enabled bool) error {
 		err = e.sysProxy.Disable()
 	}
 	if err != nil {
+		log.Printf("[engine] 设置系统代理失败 (enabled=%v port=%d): %v", enabled, port, err)
 		return err
 	}
 
+	log.Printf("[engine] 系统代理已切换: enabled=%v target=127.0.0.1:%d", enabled, port)
 	e.mu.Lock()
 	e.systemProxyOn = enabled
 	e.mu.Unlock()
@@ -760,17 +777,27 @@ func (e *Engine) SetAutoSysProxyOnStartUp(enabled bool) error {
 	return nil
 }
 
-// localProxyURLForCloud 在隧道已连上且本地代理已启动时返回本地代理地址，供云端同步优先经隧道访问。
-func (e *Engine) localProxyURLForCloud() string {
+// LocalProxyURL 在隧道已连上且本地代理已启动时返回本地混合代理地址，
+// 供云端同步与在线更新优先经由内置隧道访问，无需依赖操作系统全局代理开关。
+func (e *Engine) LocalProxyURL() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if !e.proxyStarted || e.state != StateConnected || e.cfg.ProxyPort <= 0 {
 		return ""
 	}
-	if e.cfg.ProxyUsername != "" && e.cfg.ProxyPassword != "" {
-		return fmt.Sprintf("http://%s:%s@127.0.0.1:%d", e.cfg.ProxyUsername, e.cfg.ProxyPassword, e.cfg.ProxyPort)
+	u := &url.URL{
+		Scheme: "http",
+		Host:   fmt.Sprintf("127.0.0.1:%d", e.cfg.ProxyPort),
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d", e.cfg.ProxyPort)
+	if e.cfg.ProxyUsername != "" && e.cfg.ProxyPassword != "" {
+		u.User = url.UserPassword(e.cfg.ProxyUsername, e.cfg.ProxyPassword)
+	}
+	return u.String()
+}
+
+// localProxyURLForCloud 保持包内调用简洁，复用 LocalProxyURL。
+func (e *Engine) localProxyURLForCloud() string {
+	return e.LocalProxyURL()
 }
 
 // SyncSubscription 从官方云端同步最新订阅节点、流量用量、到期时间、VIP 等级与自定义分流规则，
@@ -1240,7 +1267,7 @@ func (e *Engine) reloadRulesLocked() {
 	e.mu.Unlock()
 }
 
-// Reload 重新从磁盘读取 ~/.FlyShadow/config.json，刷新规则、代理监听与隧道。
+// Reload 重新从磁盘读取配置文件，刷新规则、代理监听与隧道。
 func (e *Engine) Reload() error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
@@ -1438,6 +1465,7 @@ func (e *Engine) startLocalProxyLocked() error {
 			e.mu.Lock()
 			e.proxyStarted = true
 			e.mu.Unlock()
+			log.Printf("[engine] 本地混合代理已监听: port=%d allowLAN=%v auth=%v attempt=%d", port, allowLAN, user != "" && pass != "", attempt+1)
 			return nil
 		}
 		select {
@@ -1446,6 +1474,7 @@ func (e *Engine) startLocalProxyLocked() error {
 		case <-time.After(150 * time.Millisecond):
 		}
 	}
+	log.Printf("[engine] 启动本地混合代理失败 (port=%d allowLAN=%v): %v", port, allowLAN, err)
 	return err
 }
 
@@ -1468,6 +1497,7 @@ func (e *Engine) connectCurrentLocked() error {
 	}
 
 	decision := core.ResolveTransportDecision(udpAcc, nativeUDP, *node)
+	log.Printf("[engine] 开始连接节点: id=%d name=%q quic=%v nativeUDP=%v", node.ID, node.DisplayName(), decision.EnableQuic, decision.EnableNativeUDP)
 
 	e.mu.Lock()
 	e.state = StateConnecting
@@ -1478,6 +1508,7 @@ func (e *Engine) connectCurrentLocked() error {
 	// 先更新原生 UDP 选项，再建连（支持热切节点与热切 UDP/QUIC 参数）
 	e.core.SetNativeUDP(decision.EnableNativeUDP)
 	if err := e.core.ConnectTunnel(node.Host, node.Port, node.Password, decision.EnableQuic); err != nil {
+		log.Printf("[engine] 节点建连调用失败 (id=%d name=%q): %v", node.ID, node.DisplayName(), err)
 		e.mu.Lock()
 		e.state = StateError
 		e.lastError = err.Error()
@@ -1510,9 +1541,12 @@ func (e *Engine) connectCurrentLocked() error {
 		e.downloadSpeedBps = 0
 		e.lastSampleTime = time.Now()
 		e.tunnelPingMs = e.core.TunnelPingDelay()
+		log.Printf("[engine] 节点已连接: id=%d name=%q ping=%dms", node.ID, node.DisplayName(), e.tunnelPingMs)
 	} else {
+		st := e.core.TunnelStatus()
 		e.state = StateError
-		e.lastError = fmt.Sprintf("连接节点 %s 超时（状态码 %d）", node.DisplayName(), e.core.TunnelStatus())
+		e.lastError = fmt.Sprintf("连接节点 %s 超时（状态码 %d）", node.DisplayName(), st)
+		log.Printf("[engine] 节点连接超时: id=%d name=%q status=%d", node.ID, node.DisplayName(), st)
 	}
 	e.mu.Unlock()
 	e.emit()

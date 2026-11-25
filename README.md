@@ -66,24 +66,33 @@
 - **实时连接监控与精准进程识别**：对接核心库 `get_tunnel_mapper_info_json` 与 `close_connect`，macOS 下自动批量反查连向本地代理的真实客户端进程（避免误标为代理自身），查看目标域名、进程名、路由结果与实时流量，并可一键加为直连/代理规则、踢掉旧连接即刻生效。
 - **单二进制内置 CLI（自动链接 PATH）**：无参数运行即启动常驻 GUI；安装运行后自动将命令行工具 `fsbar` 链接/注册到系统 `PATH` 目录（macOS 自动软链至 `/usr/local/bin`、`/opt/homebrew/bin` 或 `~/.local/bin`，Windows 安装器与运行时自动生成 `fsbar.cmd` 并写入用户 `PATH`），支持终端与 SSH 远程运维，全部命令支持 `--json` 输出。
 - **跨平台系统代理与安全退出**：支持 macOS / Windows 系统代理一键开关、启动连上后自动开启（同步 `autoSetSysProxyOnStartUp`），退出时自动关闭系统代理并安全断开隧道。
-- **无损配置写回**：按 `map[string]json.RawMessage` 原子写回 `config.json`，完整保留账号 token、订阅密码等所有原生字段；本客户端自身外观偏好独立保存在 `flyshadow-bar.prefs.json`。
-- **自动静默增量更新**：基于 MyGo 原生更新器与 Ed25519 签名校验，启动后及每 30 分钟自动检测新版本，发现更新时直接在后台静默下载极小的二进制增量补丁（`.delta`）并完成验签安装，就绪后在弹窗顶部醒目位置一键「重启更新」；同时保留 CLI `fsbar update` 手动检查与下载能力。
+- **无损配置写回与独立数据目录**：默认使用独立程序主目录 `~/.flyshadowbar`（Windows 为 `%USERPROFILE%\.flyshadowbar`），不与原版 `~/.FlyShadow` 混写；首次运行或升级时若存在旧配置则自动无损复制迁移，按 `map[string]json.RawMessage` 原子写回 `config.json`，完整保留账号 token、订阅密码等所有原生字段；界面偏好与滚动程序日志独立保存在同一目录下。
+- **自动静默增量更新**：基于 MyGo 原生更新器与 Ed25519 签名校验，优先经由本机内置混合代理访问更新源并自动回退系统代理与直连（未开系统代理同样可用）；启动后及每 30 分钟自动检测新版本，后台静默下载增量补丁（`.delta`）并验签安装，就绪后在弹窗顶部一键「重启更新」；同时保留 CLI `fsbar update` 手动检查与下载能力。
 
 ## 自动查找规则
 
-启动时会自动定位配置文件、原生核心库与 GeoIP 数据库，所有路径均支持环境变量覆盖。
+启动时会自动初始化程序主目录并定位配置文件、原生核心库与 GeoIP 数据库，所有路径均支持环境变量覆盖。
 
-### 配置文件
+### 程序主目录与配置文件
 
-按以下优先级查找：
+FlyShadow Bar 使用独立主目录保存配置、界面偏好、运行态文件、缓存与程序日志：
+
+- **macOS**：`~/.flyshadowbar`
+- **Windows**：`%USERPROFILE%\.flyshadowbar`
+
+首次安装或从旧版本在线更新时，若目标目录尚无 `config.json` / `flyshadow-bar.prefs.json` 且本机存在 `~/.FlyShadow/` 旧文件，应用会自动将其无损复制至 `~/.flyshadowbar/`（绝不修改或删除原版目录）。
+
+配置文件按以下优先级查找：
 
 1. 环境变量 `FLYSHADOW_CONFIG_PATH` 指定的完整路径。
-2. 环境变量 `FLYSHADOW_CONFIG_DIR` 下的 `config.json`。
-3. 默认配置目录：
-   - **macOS**：`~/.FlyShadow/config.json`
-   - **Windows**：`%USERPROFILE%\.FlyShadow\config.json`
+2. 环境变量 `FLYSHADOW_BAR_DIR`（兼容 `FLYSHADOW_CONFIG_DIR`）下的 `config.json`。
+3. 默认主目录：`~/.flyshadowbar/config.json`（Windows 为 `%USERPROFILE%\.flyshadowbar\config.json`）。
 
-客户端自身的轻量界面偏好保存在同一目录下的 `flyshadow-bar.prefs.json`，运行时本地控制发现文件保存在 `flyshadow-bar.run.json`（权限 `0600`，退出自动清理）。
+同一主目录下还包含：
+- `flyshadow-bar.prefs.json`：客户端自身的轻量界面偏好。
+- `flyshadow-bar.run.json`：运行时本地控制发现文件（权限 `0600`，退出自动清理）。
+- `logs/flyshadow-bar.log`：自动滚动程序日志（单文件上限 5 MiB，保留 3 份历史归档，可在「设置 → 关于与更新」一键打开目录或运行 `fsbar logs` 查看）。
+- `cache/`：从官方 JAR 解压的核心动态库与 GeoIP 缓存。
 
 ### 原生核心库
 
@@ -91,31 +100,34 @@
 
 - **macOS**（`libflyshadow_core_lib.dylib`）：
   1. 可执行文件同级目录、`.app/Contents/Resources`、`.app/Contents/Frameworks` 及当前工作目录。
-  2. `~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib`（按语义化版本号降序选取）。
-  3. 自动扫描 `/Applications/FlyShadow.app/Contents/app/common-desktop-*.jar`（及 `~/Applications/` 下对应路径），按当前架构自动解压 `darwin-aarch64/libflyshadow_core_lib.dylib`（Apple Silicon）或 `darwin-x86-64/libflyshadow_core_lib.dylib`（Intel）并缓存至 `~/.FlyShadow/flyshadow-bar-cache/`。
+  2. `~/.flyshadowbar/lib/<最新版本>/` 与 `~/.flyshadowbar/cache/`。
+  3. 只读兼容 `~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib`（按语义化版本号降序选取）。
+  4. 自动扫描 `/Applications/FlyShadow.app/Contents/app/common-desktop-*.jar`（及 `~/Applications/` 下对应路径），按当前架构自动解压 `darwin-aarch64/libflyshadow_core_lib.dylib`（Apple Silicon）或 `darwin-x86-64/libflyshadow_core_lib.dylib`（Intel）并缓存至 `~/.flyshadowbar/cache/`。
 - **Windows**（`flyshadow_core_lib.dll`）：
   1. 可执行文件同级目录及当前工作目录。
-  2. `%USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll`。
-  3. 常见安装目录（`%LOCALAPPDATA%`、`%ProgramFiles%`、`%ProgramFiles(x86)%` 下的 `FlyShadow` 与 `Programs\FlyShadow`，及其 `app`、`lib`、`resources` 子目录）。
-  4. 自动扫描上述安装目录内的 `common-desktop-*.jar`，解压 `win32-x86-64/flyshadow_core_lib.dll` 并缓存至 `%USERPROFILE%\.FlyShadow\flyshadow-bar-cache\`。
+  2. `%USERPROFILE%\.flyshadowbar\lib\<最新版本>\` 与 `%USERPROFILE%\.flyshadowbar\cache\`。
+  3. 只读兼容 `%USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll`。
+  4. 常见安装目录（`%LOCALAPPDATA%`、`%ProgramFiles%`、`%ProgramFiles(x86)%` 下的 `FlyShadow` 与 `Programs\FlyShadow`，及其 `app`、`lib`、`resources` 子目录）。
+  5. 自动扫描上述安装目录内的 `common-desktop-*.jar`，解压 `win32-x86-64/flyshadow_core_lib.dll` 并缓存至 `%USERPROFILE%\.flyshadowbar\cache\`。
 
 ### GeoIP 数据库
 
 按以下优先级查找 `Country-only-cn-private.mmdb`：
 
 1. 环境变量 `FLYSHADOW_GEOIP` 指定的路径。
-2. 可执行文件候选目录、`~/.FlyShadow`、`~/.FlyShadow/geoip`、`~/.FlyShadow/flyshadow-bar-cache`。
-3. 自动从官方 `common-desktop-*.jar` 中的 `geoip/Country-only-cn-private.mmdb` 解压并缓存。
+2. 可执行文件候选目录、`~/.flyshadowbar`（含 `geoip` / `cache`）及只读兼容 `~/.FlyShadow`（含 `geoip`）。
+3. 自动从官方 `common-desktop-*.jar` 中的 `geoip/Country-only-cn-private.mmdb` 解压并缓存至 `~/.flyshadowbar/cache/`。
 
 ### 环境变量一览
 
 | 环境变量 | 说明 |
 | --- | --- |
-| `FLYSHADOW_CONFIG_DIR` | 自定义 FlyShadow 配置目录（默认 `~/.FlyShadow`） |
+| `FLYSHADOW_BAR_DIR` | 自定义 FlyShadow Bar 程序主目录（默认 `~/.flyshadowbar`，兼容旧变量 `FLYSHADOW_CONFIG_DIR`） |
 | `FLYSHADOW_CONFIG_PATH` | 自定义 `config.json` 完整路径 |
+| `FLYSHADOW_BAR_LOG_FILE` | 自定义程序日志文件路径（默认 `~/.flyshadowbar/logs/flyshadow-bar.log`） |
 | `FLYSHADOW_CORE_LIB` | 显式指定原生动态库路径（`.dylib` / `.dll`） |
 | `FLYSHADOW_GEOIP` | 显式指定 `Country-only-cn-private.mmdb` 路径 |
-| `FLYSHADOW_BAR_RUN_FILE` | 自定义运行态发现文件路径（默认 `~/.FlyShadow/flyshadow-bar.run.json`） |
+| `FLYSHADOW_BAR_RUN_FILE` | 自定义运行态发现文件路径（默认 `~/.flyshadowbar/flyshadow-bar.run.json`） |
 | `FLYSHADOW_UPDATE_URL` | 可选镜像/测试更新源目录（仍强制官方 Ed25519 公钥验签） |
 
 ## CLI 使用说明（`fsbar`）
@@ -141,6 +153,7 @@
 | `rule toggle <id>` | - | 启用或禁用指定自定义规则并热生效 |
 | `rule rm <id>` | `rule del` | 删除指定自定义规则并热生效 |
 | `conns` | `connections` | 查看底层核心库当前的实时活跃连接列表 |
+| `logs [-n N] [--path]` | `log` | 查看程序最近滚动日志或输出日志文件路径（无需桌面端运行） |
 | `version` | `-v` / `--version` | 输出客户端版本号、提交哈希与构建时间 |
 | `update` | - | 检查 GitHub Releases 最新版本（`--download` 自动下载安装包） |
 | `install-cli` | - | 将当前 `fsbar` 自动链接/注册到系统 `PATH` 目录（支持 `--dir` 指定目录） |

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,12 +19,16 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/netproxy"
+
+	"github.com/KevinXC5/flyshadow-bar/internal/version"
 )
 
 const (
 	updateProgressThrottle = 50 * time.Millisecond
 	updateIdleTimeout      = time.Minute
 	updateInitialDelay     = 5 * time.Second
+	updateRetryDelay       = 30 * time.Second
 	updateCheckInterval    = 30 * time.Minute
 )
 
@@ -72,55 +77,195 @@ type UpdateManager struct {
 
 	idleTimeout   time.Duration
 	initialDelay  time.Duration
+	retryDelay    time.Duration
 	checkInterval time.Duration
 }
 
-func newUpdateManager(restartFn func()) *UpdateManager {
+func newUpdateManager(restartFn func(), localProxyFn func() string) *UpdateManager {
 	if raw := strings.TrimSpace(os.Getenv("FLYSHADOW_UPDATE_URL")); raw != "" {
-		if src, err := newDirUpdateSource(raw, runtime.GOOS, runtime.GOARCH); err == nil {
+		if src, err := newDirUpdateSource(raw, runtime.GOOS, runtime.GOARCH, localProxyFn); err == nil {
 			mygo.Updater.SetSource(src)
+			log.Printf("[updater] 已启用自定义更新源: %s", raw)
+		} else {
+			log.Printf("[updater] 自定义更新源 FLYSHADOW_UPDATE_URL 无效，回退默认源: %v", err)
 		}
+	} else if repo := strings.Trim(strings.TrimSpace(version.GithubRepo), "/"); repo != "" {
+		src := newGitHubFallbackUpdateSource(repo, runtime.GOOS, runtime.GOARCH, localProxyFn)
+		mygo.Updater.SetSource(src)
 	}
 	return &UpdateManager{
 		restartFn:     restartFn,
 		idleTimeout:   updateIdleTimeout,
 		initialDelay:  updateInitialDelay,
+		retryDelay:    updateRetryDelay,
 		checkInterval: updateCheckInterval,
 	}
+}
+
+type updateRoute struct {
+	name      string
+	transport *http.Transport
+}
+
+// buildUpdateRoutes 按「本机内置代理 → 系统/环境代理 → 直连」构造多路由回退链。
+// 当目标为本机回环地址（本地测试源）时仅保留直连，避免被代理劫持。
+func buildUpdateRoutes(targetURL string, localProxyURL string, headerTimeout time.Duration) []updateRoute {
+	if isLoopbackURL(targetURL) {
+		return []updateRoute{{
+			name:      "direct",
+			transport: newUpdateTransport(nil, headerTimeout),
+		}}
+	}
+
+	routes := make([]updateRoute, 0, 3)
+	if rawProxy := strings.TrimSpace(localProxyURL); rawProxy != "" {
+		if parsed, err := url.Parse(rawProxy); err == nil && parsed.Host != "" {
+			routes = append(routes, updateRoute{
+				name:      "local-proxy",
+				transport: newUpdateTransport(http.ProxyURL(parsed), headerTimeout),
+			})
+		}
+	}
+
+	sysTransport := netproxy.Transport().Clone()
+	sysTransport.ResponseHeaderTimeout = headerTimeout
+	routes = append(routes, updateRoute{
+		name:      "system-proxy",
+		transport: sysTransport,
+	})
+
+	routes = append(routes, updateRoute{
+		name:      "direct",
+		transport: newUpdateTransport(nil, headerTimeout),
+	})
+	return routes
+}
+
+func newUpdateTransport(proxyFn func(*http.Request) (*url.URL, error), headerTimeout time.Duration) *http.Transport {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.Proxy = proxyFn
+	base.DialContext = (&net.Dialer{
+		Timeout:   8 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	base.TLSHandshakeTimeout = 10 * time.Second
+	base.ResponseHeaderTimeout = headerTimeout
+	return base
+}
+
+func isLoopbackURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func openURLWithFallback(ctx context.Context, targetURL string, localProxyFn func() string, headerTimeout time.Duration) (io.ReadCloser, error) {
+	u, err := url.Parse(targetURL)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("无效的更新下载地址: %q", targetURL)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackURL(targetURL)) {
+		return nil, fmt.Errorf("更新地址仅允许 https 或本机回环 http: %q", targetURL)
+	}
+
+	var localProxy string
+	if localProxyFn != nil {
+		localProxy = strings.TrimSpace(localProxyFn())
+	}
+	routes := buildUpdateRoutes(targetURL, localProxy, headerTimeout)
+
+	var lastErr error
+	for _, rt := range routes {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		// 保持 ASCII User-Agent，与 mygo-updater 对齐，避免 GitHub CDN 拒绝非 ASCII 请求头
+		req.Header.Set("User-Agent", "mygo-updater")
+
+		client := &http.Client{Transport: rt.transport}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("[%s] %w", rt.name, err)
+			log.Printf("[updater] 通过 %s 请求失败 (%s): %v", rt.name, targetURL, err)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			log.Printf("[updater] 通过 %s 获取更新资源成功 (%s)", rt.name, targetURL)
+			return resp.Body, nil
+		}
+		resp.Body.Close()
+		lastErr = fmt.Errorf("[%s] GET %s: %s", rt.name, targetURL, resp.Status)
+		log.Printf("[updater] 通过 %s 请求返回异常状态 (%s): %s", rt.name, targetURL, resp.Status)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, lastErr
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("无法下载更新资源: %s", targetURL)
+}
+
+// githubFallbackUpdateSource 默认指向 GitHub Releases 最新清单，并优先经由本机内置代理访问，
+// 解决 Windows / macOS 未开启系统代理或环境变量代理冲突导致在线更新失败的问题。
+// 所有更新包仍强制由编译进应用的 Ed25519 公钥验证签名，安全性与默认源完全一致。
+type githubFallbackUpdateSource struct {
+	manifestURL  string
+	localProxyFn func() string
+}
+
+func newGitHubFallbackUpdateSource(repo, goos, goarch string, localProxyFn func() string) *githubFallbackUpdateSource {
+	name := "update-" + goos + "-" + goarch + ".json"
+	return &githubFallbackUpdateSource{
+		manifestURL:  "https://github.com/" + strings.Trim(repo, "/") + "/releases/latest/download/" + name,
+		localProxyFn: localProxyFn,
+	}
+}
+
+func (s *githubFallbackUpdateSource) Manifest(ctx context.Context, _ bool) (io.ReadCloser, error) {
+	return openURLWithFallback(ctx, s.manifestURL, s.localProxyFn, 12*time.Second)
+}
+
+func (s *githubFallbackUpdateSource) Open(ctx context.Context, rawURL string) (io.ReadCloser, error) {
+	return openURLWithFallback(ctx, rawURL, s.localProxyFn, 30*time.Second)
 }
 
 // dirUpdateSource 支持通过环境变量 FLYSHADOW_UPDATE_URL 指定自建镜像或本地回环测试更新源。
 // 所有下载文件仍强制由编译进应用的 Ed25519 公钥验证签名，无法绕过签名校验。
 type dirUpdateSource struct {
-	baseURL string
-	target  string
-	client  *http.Client
+	baseURL      string
+	target       string
+	localProxyFn func() string
 }
 
-func newDirUpdateSource(rawURL, goos, goarch string) (*dirUpdateSource, error) {
+func newDirUpdateSource(rawURL, goos, goarch string, localProxyFn func() string) (*dirUpdateSource, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("无效的更新源地址: %q", rawURL)
 	}
-	host := u.Hostname()
-	isLoopback := strings.EqualFold(host, "localhost")
-	if !isLoopback {
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			isLoopback = true
-		}
-	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback) {
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackURL(rawURL)) {
 		return nil, fmt.Errorf("更新源仅允许 https 或本机回环 http: %q", rawURL)
 	}
 	return &dirUpdateSource{
-		baseURL: strings.TrimRight(u.String(), "/"),
-		target:  goos + "-" + goarch,
-		client:  &http.Client{Timeout: 5 * time.Minute},
+		baseURL:      strings.TrimRight(u.String(), "/"),
+		target:       goos + "-" + goarch,
+		localProxyFn: localProxyFn,
 	}, nil
 }
 
 func (s *dirUpdateSource) Manifest(ctx context.Context, _ bool) (io.ReadCloser, error) {
-	return s.Open(ctx, s.baseURL+"/update-"+s.target+".json")
+	return openURLWithFallback(ctx, s.baseURL+"/update-"+s.target+".json", s.localProxyFn, 12*time.Second)
 }
 
 func (s *dirUpdateSource) Open(ctx context.Context, rawURL string) (io.ReadCloser, error) {
@@ -133,20 +278,7 @@ func (s *dirUpdateSource) Open(ctx context.Context, rawURL string) (io.ReadClose
 			targetURL = s.baseURL + "/" + strings.TrimLeft(u.Path, "/")
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "fsbar-updater")
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: %s", targetURL, resp.Status)
-	}
-	return resp.Body, nil
+	return openURLWithFallback(ctx, targetURL, s.localProxyFn, 30*time.Second)
 }
 
 func (u *UpdateManager) version() string {
@@ -239,11 +371,18 @@ func (u *UpdateManager) Check(ctx context.Context) (UpdateStatus, error) {
 		u.mu.Unlock()
 	}()
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
+	log.Printf("[updater] 开始检查更新 (current=%s)", u.version())
 	up, err := u.check(ctx)
 	if err != nil {
+		log.Printf("[updater] 检查更新失败: %v", err)
 		return UpdateStatus{}, errors.New("检查更新失败，请检查网络连接后重试")
+	}
+	if up != nil {
+		log.Printf("[updater] 发现新版本: current=%s available=%s", u.version(), up.Version)
+	} else {
+		log.Printf("[updater] 当前已是最新版本: %s", u.version())
 	}
 	u.mu.Lock()
 	u.pending = up
@@ -287,7 +426,9 @@ func (u *UpdateManager) Install(ctx context.Context) (UpdateStatus, error) {
 	if idle <= 0 {
 		idle = updateIdleTimeout
 	}
+	log.Printf("[updater] 开始下载并安装更新: target=%s", up.Version)
 	if err := u.installWithTimeout(ctx, up, idle); err != nil {
+		log.Printf("[updater] 安装更新失败 (target=%s): %v", up.Version, err)
 		switch {
 		case errors.Is(err, context.Canceled):
 			return UpdateStatus{}, updateCanceledError{}
@@ -297,6 +438,7 @@ func (u *UpdateManager) Install(ctx context.Context) (UpdateStatus, error) {
 			return UpdateStatus{}, errors.New("安装更新失败，当前版本仍可继续使用，请稍后重试")
 		}
 	}
+	log.Printf("[updater] 更新已安装就绪，等待重启生效: target=%s", up.Version)
 	u.mu.Lock()
 	u.installed = true
 	u.mu.Unlock()
@@ -338,6 +480,10 @@ func (u *UpdateManager) StartBackground(stopCh <-chan struct{}) {
 	if initDelay <= 0 {
 		initDelay = updateInitialDelay
 	}
+	retryDelay := u.retryDelay
+	if retryDelay <= 0 {
+		retryDelay = updateRetryDelay
+	}
 	interval := u.checkInterval
 	if interval <= 0 {
 		interval = updateCheckInterval
@@ -345,15 +491,24 @@ func (u *UpdateManager) StartBackground(stopCh <-chan struct{}) {
 	go func() {
 		timer := time.NewTimer(initDelay)
 		defer timer.Stop()
+		retriedEarly := false
 		for {
 			select {
 			case <-stopCh:
 				return
 			case <-timer.C:
-				if u.checkAndAutoInstall(stopCh) {
+				installed, failed := u.checkAndAutoInstall(stopCh)
+				if installed {
 					// 新版本已安装就绪，等待用户重启生效即可，无需继续轮询
 					return
 				}
+				if failed && !retriedEarly {
+					// 刚启动时隧道可能尚在建连，30 秒后快速补检一次
+					retriedEarly = true
+					timer.Reset(retryDelay)
+					continue
+				}
+				retriedEarly = true
 				timer.Reset(interval)
 			}
 		}
@@ -361,8 +516,8 @@ func (u *UpdateManager) StartBackground(stopCh <-chan struct{}) {
 }
 
 // checkAndAutoInstall 执行一轮静默检查，若发现新版本则自动后台下载安装增量更新。
-// 返回 true 表示更新已安装就绪。
-func (u *UpdateManager) checkAndAutoInstall(stopCh <-chan struct{}) bool {
+// 返回 (installed, failed)：installed 为 true 表示更新已安装就绪，failed 表示本轮检查或安装出错。
+func (u *UpdateManager) checkAndAutoInstall(stopCh <-chan struct{}) (bool, bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -375,16 +530,16 @@ func (u *UpdateManager) checkAndAutoInstall(stopCh <-chan struct{}) bool {
 
 	status, err := u.Check(ctx)
 	if err != nil {
-		return false
+		return false, true
 	}
 	if status.Installed {
 		if u.readyFn != nil {
 			u.readyFn(status)
 		}
-		return true
+		return true, false
 	}
 	if status.Available == "" {
-		return false
+		return false, false
 	}
 	if u.availableFn != nil {
 		u.availableFn(status)
@@ -395,12 +550,12 @@ func (u *UpdateManager) checkAndAutoInstall(stopCh <-chan struct{}) bool {
 		if u.installFailFn != nil {
 			u.installFailFn()
 		}
-		return false
+		return false, true
 	}
 	if u.readyFn != nil {
 		u.readyFn(installedStatus)
 	}
-	return true
+	return true, false
 }
 
 // installWithTimeout 在下载长时间无字节进展时取消请求，避免卡死在慢连接上。

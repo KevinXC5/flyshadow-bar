@@ -1110,6 +1110,25 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				renderKVRow(c, p, "核心路径", nonEmpty(snap.CoreLibPath, "未检测到"))
 				renderKVRow(c, p, "配置文件", nonEmpty(snap.ConfigPath, "未知"))
 
+				logPath := ""
+				if vm.app != nil {
+					logPath = vm.app.logFilePath()
+				} else {
+					logPath, _ = config.DefaultLogPath()
+				}
+				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+					ui.Column(c).Grow(1).Gap(2).Children(func() {
+						ui.Text(c, "程序日志").FontSize(11).TextColor(p.textMuted)
+						ui.Text(c, nonEmpty(logPath, "未启用")).FontSize(11.5).TextColor(p.textSecondary).Wrap()
+					})
+					if ui.Button(c.Key("btn-open-logs"), "打开目录").Padding(5, 11).Radius(7).
+						Tooltip("在文件管理器中定位程序日志文件").Clicked() {
+						if vm.app != nil {
+							vm.app.openLogDirectory()
+						}
+					}
+				})
+
 				ui.Divider(c)
 				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
 					cliDesc := "未链接"
@@ -1179,10 +1198,14 @@ func (vm *viewModel) checkUpdate() {
 	}
 
 	repo := vm.currentPrefs().UpdateRepo
+	var localProxy string
+	if vm.app.eng != nil {
+		localProxy = vm.app.eng.LocalProxyURL()
+	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
-		res, err := updater.Check(ctx, repo, version.Version)
+		res, err := updater.CheckWithProxy(ctx, repo, version.Version, localProxy)
 		vm.app.updateWindow(func() {
 			vm.checkingUpdate = false
 			if err != nil {

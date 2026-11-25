@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/applog"
 	"github.com/KevinXC5/flyshadow-bar/internal/cliinstall"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/control"
@@ -71,7 +72,12 @@ func runCLI(args []string) error {
 		if hasHelpFlag(rest) {
 			return printCommandHelp(os.Stdout, "update")
 		}
-		return cmdUpdate(rest, jsonOut)
+		return cmdUpdate(rest, runFile, jsonOut)
+	case "logs", "log":
+		if hasHelpFlag(rest) {
+			return printCommandHelp(os.Stdout, "logs")
+		}
+		return cmdLogs(rest, jsonOut)
 	case "install-cli":
 		if hasHelpFlag(rest) {
 			return printCommandHelp(os.Stdout, "install-cli")
@@ -467,7 +473,85 @@ func cmdInstallCLI(args []string, jsonOut bool) error {
 	return nil
 }
 
-func cmdUpdate(args []string, jsonOut bool) error {
+func cmdLogs(args []string, jsonOut bool) error {
+	lines := 100
+	onlyPath := false
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--path":
+			onlyPath = true
+		case args[i] == "-n" || args[i] == "--lines":
+			if i+1 >= len(args) {
+				return errors.New("--lines 缺少行数参数（如 fsbar logs -n 200）")
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(args[i+1]))
+			if err != nil || n <= 0 {
+				return fmt.Errorf("无效的日志行数 %q（需为正整数）", args[i+1])
+			}
+			lines = n
+			i++
+		case strings.HasPrefix(args[i], "--lines="):
+			raw := strings.TrimPrefix(args[i], "--lines=")
+			n, err := strconv.Atoi(strings.TrimSpace(raw))
+			if err != nil || n <= 0 {
+				return fmt.Errorf("无效的日志行数 %q（需为正整数）", raw)
+			}
+			lines = n
+		default:
+			return fmt.Errorf("logs 不支持的参数 %q（运行 `fsbar help logs` 查看用法）", args[i])
+		}
+	}
+
+	logPath, err := config.DefaultLogPath()
+	if err != nil {
+		return err
+	}
+	if onlyPath {
+		if jsonOut {
+			return writeIndentedJSON(map[string]string{"path": logPath})
+		}
+		fmt.Println(logPath)
+		return nil
+	}
+
+	tail, err := applog.ReadTail(logPath, lines)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if jsonOut {
+				return writeIndentedJSON(map[string]any{"path": logPath, "exists": false, "lines": []string{}})
+			}
+			fmt.Printf("暂无程序日志文件（路径: %s）\n", logPath)
+			return nil
+		}
+		return fmt.Errorf("读取程序日志失败 (%s): %w", logPath, err)
+	}
+	if jsonOut {
+		return writeIndentedJSON(map[string]any{"path": logPath, "exists": true, "lines": tail})
+	}
+	fmt.Fprintf(os.Stderr, "# 日志文件: %s（最近 %d 行）\n", logPath, len(tail))
+	for _, line := range tail {
+		fmt.Println(line)
+	}
+	return nil
+}
+
+// detectRunningLocalProxy 尝试探测运行中的 FlyShadow Bar 实例本地代理，
+// 若隧道已连接且未开启代理密码鉴权，则供 `fsbar update` 优先借道访问 GitHub。
+func detectRunningLocalProxy(runFile string) string {
+	cli, err := control.Discover(runFile)
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	snap, err := cli.Status(ctx)
+	if err != nil || snap == nil || snap.State != engine.StateConnected || snap.ProxyPort <= 0 || snap.ProxyAuthEnabled {
+		return ""
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", snap.ProxyPort)
+}
+
+func cmdUpdate(args []string, runFile string, jsonOut bool) error {
 	download := false
 	repoOverride := ""
 	for i := 0; i < len(args); i++ {
@@ -488,9 +572,10 @@ func cmdUpdate(args []string, jsonOut bool) error {
 		repoOverride = config.LoadAppPrefs("").UpdateRepo
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	localProxy := detectRunningLocalProxy(runFile)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
-	res, err := updater.Check(ctx, repoOverride, version.Version)
+	res, err := updater.CheckWithProxy(ctx, repoOverride, version.Version, localProxy)
 	if err != nil {
 		return err
 	}
@@ -522,7 +607,7 @@ func cmdUpdate(args []string, jsonOut bool) error {
 	fmt.Printf("正在下载 %s …\n", res.AssetName)
 	dlCtx, dlCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer dlCancel()
-	if err := updater.DownloadAsset(dlCtx, res.AssetURL, dest, nil); err != nil {
+	if err := updater.DownloadAssetWithProxy(dlCtx, res.AssetURL, dest, localProxy, nil); err != nil {
 		return err
 	}
 	fmt.Printf("下载完成: %s\n", dest)
@@ -619,7 +704,7 @@ GUI 启动选项（直接启动桌面端时生效）:
 
 CLI 全局选项（可放在任意位置，适用于所有子命令）:
   --json                                    以格式化 JSON 输出结果，便于脚本或 jq 解析
-  --run-file <路径>                         指定运行态发现文件路径（默认 ~/.FlyShadow/flyshadow-bar.run.json）
+  --run-file <路径>                         指定运行态发现文件路径（默认 ~/.flyshadowbar/flyshadow-bar.run.json）
 
 状态与节点控制:
   status                                    查看连接状态、当前节点、代理模式、端口、传输协议与实时速率
@@ -632,7 +717,7 @@ CLI 全局选项（可放在任意位置，适用于所有子命令）:
   udp [on|off|toggle]                       开关 UDP 加速（QUIC）并热重连，省略参数默认 toggle
   native-udp [on|off|toggle]                开关原生 UDP 转发并热重连，省略参数默认 toggle
   sysproxy [on|off|toggle]                  开关操作系统代理，省略参数默认 toggle
-  reload                                    重新读取 ~/.FlyShadow/config.json 并热刷新规则与配置
+  reload                                    重新读取 ~/.flyshadowbar/config.json 并热刷新规则与配置
   sync                                      从云端同步最新订阅节点、流量用量、到期时间与自定义规则
 
 自定义分流规则（立即热生效，不断开当前隧道）:
@@ -643,14 +728,17 @@ CLI 全局选项（可放在任意位置，适用于所有子命令）:
 
 连接监控与维护:
   conns | connections                       查看核心库当前实时活跃连接（协议、目标、路由、进程与流量）
+  logs [-n <行数>] [--path]                 查看程序最近运行日志或输出日志文件路径（无需实例运行）
   version                                   输出 fsbar 版本号、Commit 与构建时间（别名: -v / --version）
   update [--download] [--repo <owner/r>]    检查 GitHub Releases 最新版本，加 --download 下载安装包
   install-cli [--dir <目录>]                将当前 fsbar 链接/注册到系统 PATH 目录（支持自定义目录）
   help [子命令]                             显示总览帮助或单个子命令的完整说明
 
 常用环境变量:
-  FLYSHADOW_CONFIG_DIR                      自定义配置目录（默认 ~/.FlyShadow）
+  FLYSHADOW_BAR_DIR                         自定义程序主目录（默认 ~/.flyshadowbar）
+  FLYSHADOW_CONFIG_DIR                      兼容旧版的自定义主目录环境变量
   FLYSHADOW_CONFIG_PATH                     自定义 config.json 完整路径
+  FLYSHADOW_BAR_LOG_FILE                    自定义程序日志文件路径（默认 ~/.flyshadowbar/logs/flyshadow-bar.log）
   FLYSHADOW_CORE_LIB                        指定原生核心动态库路径（优先级高于自动查找）
   FLYSHADOW_GEOIP                           指定 Country-only-cn-private.mmdb 路径
   FLYSHADOW_BAR_RUN_FILE                    覆盖运行态发现文件路径
@@ -813,7 +901,7 @@ func printCommandHelp(w io.Writer, raw string) error {
   fsbar reload [--json] [--run-file <路径>]
 
 说明:
-  重新从磁盘加载 ~/.FlyShadow/config.json，热刷新分流规则、代理监听端口、
+  重新从磁盘加载 ~/.flyshadowbar/config.json，热刷新分流规则、代理监听端口、
   认证配置与节点信息，无需重启客户端。
 
 示例:
@@ -841,7 +929,7 @@ func printCommandHelp(w io.Writer, raw string) error {
   fsbar rule rm <规则ID> [--json]
 
 说明:
-  管理官方 ~/.FlyShadow/config.json 中的自定义分流规则（customRuleList）。
+  管理 ~/.flyshadowbar/config.json 中的自定义分流规则（customRuleList）。
   所有增删改与启停操作都会无损保存并立即热重载核心规则，不会中断当前隧道连接。
 
 子命令:
@@ -892,6 +980,24 @@ add 选项:
 示例:
   fsbar conns
   fsbar conns --json | jq '.[] | {target: .target_addr, route: .proxy_type}'
+`)
+	case "logs", "log":
+		fmt.Fprint(w, `用法:
+  fsbar logs [-n <行数>] [--path] [--json]
+
+说明:
+  读取 FlyShadow Bar 的本地滚动程序日志（默认 ~/.flyshadowbar/logs/flyshadow-bar.log），
+  无需桌面端处于运行状态即可排查启动、连接、系统代理与在线更新问题。
+
+选项:
+  -n, --lines <行数>       显示末尾行数（默认 100）
+  --path                   仅输出程序日志文件的绝对路径
+  --json                   以 JSON 格式输出日志路径与行数组
+
+示例:
+  fsbar logs
+  fsbar logs -n 200
+  fsbar logs --path
 `)
 	case "version", "-v", "--version":
 		fmt.Fprint(w, `用法:

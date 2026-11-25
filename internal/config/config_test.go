@@ -189,3 +189,84 @@ func TestLoadInitializesDefaultConfigWhenMissingAndSavesSubscribePassword(t *tes
 		t.Fatalf("uuid mismatch: got %q, want %q", reloaded.UUID, cfg.UUID)
 	}
 }
+
+func TestMigrateFromLegacyOnlineUpdateAndFreshInstall(t *testing.T) {
+	// 场景 1：全新安装（不存在旧目录 ~/.FlyShadow）
+	root := t.TempDir()
+	freshTarget := filepath.Join(root, "fresh", AppDirName)
+	missingLegacy := filepath.Join(root, "fresh", LegacyFlyShadowDirName)
+	rep, err := MigrateFromLegacy(missingLegacy, freshTarget)
+	if err != nil {
+		t.Fatalf("全新安装迁移不应失败: %v", err)
+	}
+	if rep.CopiedConfig || rep.CopiedPrefs {
+		t.Fatalf("全新安装不应复制任何文件: %+v", rep)
+	}
+	if st, err := os.Stat(freshTarget); err != nil || !st.IsDir() {
+		t.Fatalf("应自动创建目标主目录: err=%v", err)
+	}
+
+	// 场景 2：旧版在线更新（~/.FlyShadow 中已有 config.json 与 prefs.json）
+	legacyDir := filepath.Join(root, "upgrade", LegacyFlyShadowDirName)
+	targetDir := filepath.Join(root, "upgrade", AppDirName)
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantCfg := `{"proxyPort":7899,"subscribePassword":"mock-migrate-pass","customField":"keep"}`
+	wantPrefs := `{"themeMode":"dark","showTraySpeed":true}`
+	if err := os.WriteFile(filepath.Join(legacyDir, "config.json"), []byte(wantCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, PrefsFileName), []byte(wantPrefs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err = MigrateFromLegacy(legacyDir, targetDir)
+	if err != nil {
+		t.Fatalf("升级迁移失败: %v", err)
+	}
+	if !rep.CopiedConfig || !rep.CopiedPrefs {
+		t.Fatalf("应复制 config.json 与 prefs.json: %+v", rep)
+	}
+	gotCfg, err := os.ReadFile(filepath.Join(targetDir, "config.json"))
+	if err != nil || string(gotCfg) != wantCfg {
+		t.Fatalf("迁移后 config.json 不一致: err=%v got=%q", err, string(gotCfg))
+	}
+	gotPrefs, err := os.ReadFile(filepath.Join(targetDir, PrefsFileName))
+	if err != nil || string(gotPrefs) != wantPrefs {
+		t.Fatalf("迁移后 prefs.json 不一致: err=%v got=%q", err, string(gotPrefs))
+	}
+	// 旧目录文件必须原封不动保留，不破坏原版 FlyShadow
+	if _, err := os.Stat(filepath.Join(legacyDir, "config.json")); err != nil {
+		t.Fatalf("旧目录 config.json 不应被删除: %v", err)
+	}
+
+	// 场景 3：幂等性校验——新目录已有更新内容时，再次迁移绝不覆盖
+	newerCfg := `{"proxyPort":8899}`
+	if err := os.WriteFile(filepath.Join(targetDir, "config.json"), []byte(newerCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep2, err := MigrateFromLegacy(legacyDir, targetDir)
+	if err != nil {
+		t.Fatalf("二次迁移不应报错: %v", err)
+	}
+	if rep2.CopiedConfig || rep2.CopiedPrefs {
+		t.Fatalf("新目录已存在文件时不应重复复制: %+v", rep2)
+	}
+	gotCfg2, _ := os.ReadFile(filepath.Join(targetDir, "config.json"))
+	if string(gotCfg2) != newerCfg {
+		t.Fatalf("二次迁移覆盖了新目录配置: got=%q want=%q", string(gotCfg2), newerCfg)
+	}
+}
+
+func TestEnsureMigratedSkipsWhenCustomEnvSet(t *testing.T) {
+	customDir := filepath.Join(t.TempDir(), "custom-dir")
+	t.Setenv("FLYSHADOW_BAR_DIR", customDir)
+	rep, err := EnsureMigrated()
+	if err != nil {
+		t.Fatalf("EnsureMigrated: %v", err)
+	}
+	if !rep.SkippedCustom || rep.CopiedConfig || rep.CopiedPrefs {
+		t.Fatalf("设置自定义环境变量时应跳过迁移: %+v", rep)
+	}
+}
