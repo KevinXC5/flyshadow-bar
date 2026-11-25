@@ -631,6 +631,71 @@ func TestProcessTrafficViewAndSupersedingUpdateBanner(t *testing.T) {
 	}
 }
 
+func TestInteractiveControlsUsePointerCursor(t *testing.T) {
+	snap := engine.Snapshot{
+		AppVersion:             "0.2.14-test",
+		CoreVersion:            "2.0.4",
+		State:                  engine.StateConnected,
+		Mode:                   "rule",
+		ModeCode:               core.ProxyModeRule,
+		ProxyPort:              7890,
+		SystemProxy:            true,
+		UDPAccelerationEnabled: true,
+		HasCloudAuth:           true,
+		CurrentNode: &engine.NodeSnapshot{
+			ID:          1,
+			DisplayName: "香港 01",
+			EnableQuic:  true,
+			Selected:    true,
+			DelayMs:     45,
+		},
+		Nodes: []engine.NodeSnapshot{
+			{ID: 1, DisplayName: "香港 01", EnableQuic: true, Selected: true, DelayMs: 45},
+		},
+	}
+
+	vm := newViewModel(nil, snap)
+	tt := ui.NewTester(vm.render, 500, 820)
+
+	assertPointerAt := func(name string, b ui.Rect) {
+		t.Helper()
+		cx, cy := b.X+b.W/2, b.Y+b.H/2
+		tt.Move(cx, cy)
+		if got := tt.Cursor(); got != ui.CursorPointer {
+			t.Fatalf("hover %s at (%.1f, %.1f): cursor = %v, want CursorPointer (%v)", name, cx, cy, got, ui.CursorPointer)
+		}
+	}
+
+	// 1. 顶部导航分段控件「规则」
+	if tab, ok := tt.AccessByRole(ui.RoleRadio, "规则"); !ok {
+		t.Fatalf("nav segmented tab 规则 not found")
+	} else {
+		assertPointerAt("顶部导航-规则", tab.Bounds)
+	}
+
+	// 2. 顶部快捷开关（系统代理 / UDP 加速 / 原生 UDP）
+	if sw, ok := tt.AccessByRole(ui.RoleSwitch, ""); !ok {
+		t.Fatalf("quick toggle switch not found")
+	} else {
+		assertPointerAt("快捷开关", sw.Bounds)
+	}
+
+	// 3. 切到设置页，验证「查看规则」按钮与「外观」分段控件悬停也是手型指针
+	if err := tt.Click("设置"); err != nil {
+		t.Fatalf("click 设置: %v", err)
+	}
+	if btn, ok := tt.AccessByRole(ui.RoleButton, "查看规则"); !ok {
+		t.Fatalf("button 查看规则 not found")
+	} else {
+		assertPointerAt("设置-查看规则按钮", btn.Bounds)
+	}
+	if seg, ok := tt.AccessByRole(ui.RoleRadio, "深色"); !ok {
+		t.Fatalf("theme segmented option 深色 not found")
+	} else {
+		assertPointerAt("设置-深色分段", seg.Bounds)
+	}
+}
+
 func assertDialogCentered(t *testing.T, name string, bounds ui.Rect, winW, winH float32) {
 	t.Helper()
 	if bounds.W <= 0 || bounds.H <= 0 {

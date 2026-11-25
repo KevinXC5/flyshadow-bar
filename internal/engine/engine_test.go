@@ -108,9 +108,17 @@ func (m *mockCore) TestTunnelDelay(node config.Node, _ bool) int64 {
 	return 88
 }
 
-func (m *mockCore) TunnelUploadBytes() int64   { return m.upload }
-func (m *mockCore) TunnelDownloadBytes() int64 { return m.download }
-func (m *mockCore) TunnelPingDelay() int32     { return 42 }
+func (m *mockCore) TunnelUploadBytes() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.upload
+}
+func (m *mockCore) TunnelDownloadBytes() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.download
+}
+func (m *mockCore) TunnelPingDelay() int32 { return 42 }
 func (m *mockCore) TunnelStatus() int32 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -581,5 +589,89 @@ func TestEngineConnectClosesOldTunnelAndCleansUpOnTimeout(t *testing.T) {
 	// 建连前关闭一次 + 超时后清理关闭一次
 	if closes != 2 {
 		t.Fatalf("closeCalls = %d, want 2 (before connect + on timeout)", closes)
+	}
+}
+
+func TestEngineSampleStatsSyncsDisconnectAndReconnect(t *testing.T) {
+	cfgPath := writeTestConfig(t)
+	mc := &mockCore{upload: 4096, download: 65536}
+	sp := &mockSysProxy{}
+
+	eng, err := New(Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          mc,
+		SysProxy:            sp,
+		DisableAutoSysProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	eng.disconnectErrorThreshold = 3
+	if err := eng.Start(true); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	now := time.Now()
+	eng.sampleStats(now)
+	snap := eng.Snapshot()
+	if snap.State != StateConnected || snap.TunnelPingMs != 42 || snap.DownloadSpeedBps != 65536 {
+		t.Fatalf("unexpected connected snapshot: state=%q ping=%d down=%d", snap.State, snap.TunnelPingMs, snap.DownloadSpeedBps)
+	}
+
+	// 模拟底层节点失联：TunnelStatus 变为非 0
+	mc.mu.Lock()
+	mc.connected = false
+	mc.mu.Unlock()
+
+	// 第 1 次采样应立即离开「已连接」，转为「连接中」，清零速率和旧延迟，且本地代理不再对外宣称可用
+	eng.sampleStats(now.Add(time.Second))
+	snap = eng.Snapshot()
+	if snap.State != StateConnecting {
+		t.Fatalf("state after 1st disconnect sample = %q, want %q", snap.State, StateConnecting)
+	}
+	if snap.UploadSpeedBps != 0 || snap.DownloadSpeedBps != 0 || snap.TunnelPingMs != -1 {
+		t.Fatalf("disconnected metrics not cleared: up=%d down=%d ping=%d", snap.UploadSpeedBps, snap.DownloadSpeedBps, snap.TunnelPingMs)
+	}
+	if got := eng.LocalProxyURL(); got != "" {
+		t.Fatalf("LocalProxyURL() while reconnecting = %q, want empty", got)
+	}
+
+	// 第 2 次仍在重连宽限期内，保持「连接中」
+	eng.sampleStats(now.Add(2 * time.Second))
+	if got := eng.Snapshot().State; got != StateConnecting {
+		t.Fatalf("state after 2nd disconnect sample = %q, want %q", got, StateConnecting)
+	}
+
+	// 第 3 次达到阈值，转为「连接异常」并附带错误提示
+	eng.sampleStats(now.Add(3 * time.Second))
+	snap = eng.Snapshot()
+	if snap.State != StateError || snap.LastError == "" {
+		t.Fatalf("expected StateError with LastError after threshold, got state=%q err=%q", snap.State, snap.LastError)
+	}
+
+	// 模拟底层核心库后台自动重连成功（status 恢复为 0）
+	mc.mu.Lock()
+	mc.connected = true
+	mc.mu.Unlock()
+
+	eng.sampleStats(now.Add(4 * time.Second))
+	snap = eng.Snapshot()
+	if snap.State != StateConnected || snap.LastError != "" || snap.TunnelPingMs != 42 || snap.DownloadSpeedBps != 65536 {
+		t.Fatalf("expected automatic recovery to StateConnected, got state=%q err=%q ping=%d down=%d",
+			snap.State, snap.LastError, snap.TunnelPingMs, snap.DownloadSpeedBps)
+	}
+
+	// 用户主动断开后，即便底层状态再变化，sampleStats 也不得重新切回已连接
+	if err := eng.Disconnect(); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	mc.mu.Lock()
+	mc.connected = true
+	mc.mu.Unlock()
+	eng.sampleStats(now.Add(5 * time.Second))
+	if got := eng.Snapshot().State; got != StateDisconnected {
+		t.Fatalf("state after explicit Disconnect = %q, want %q", got, StateDisconnected)
 	}
 }

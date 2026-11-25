@@ -298,7 +298,7 @@ func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 		})
 		ui.Spacer(c)
 		prevTab := vm.activeTab
-		if ui.Segmented(c.Key("nav-tabs"), &vm.activeTab, "节点", "规则", "连接", "设置").Changed() {
+		if renderSegmented(c.Key("nav-tabs"), p, &vm.activeTab, "节点", "规则", "连接", "设置").Changed() {
 			if vm.activeTab != 2 {
 				vm.connSortMenuOpen = false
 			}
@@ -712,16 +712,17 @@ func (vm *viewModel) renderSubscribeModal(c *ui.Context, p palette) {
 		// 底部操作按钮
 		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
 			ui.Spacer(c)
-			if ui.Button(c.Key("btn-sub-cancel"), "取消").Padding(6, 14).Radius(7).
-				Disabled(vm.subSaving).Clicked() {
+			if applyPointerCursor(ui.Button(c.Key("btn-sub-cancel"), "取消").Padding(6, 14).Radius(7).
+				Disabled(vm.subSaving), vm.subSaving).Clicked() {
 				vm.closeSubscribeModal()
 			}
 			saveLabel := "保存并同步"
 			if vm.subSaving {
 				saveLabel = "校验中…"
 			}
-			if ui.PrimaryButton(c.Key("btn-sub-save"), saveLabel).Padding(6, 14).Radius(7).
-				Disabled(vm.subSaving || strings.TrimSpace(vm.subPasswordDraft) == "").Clicked() {
+			saveDisabled := vm.subSaving || strings.TrimSpace(vm.subPasswordDraft) == ""
+			if applyPointerCursor(ui.PrimaryButton(c.Key("btn-sub-save"), saveLabel).Padding(6, 14).Radius(7).
+				Disabled(saveDisabled), saveDisabled).Clicked() {
 				vm.submitSubscribePassword()
 			}
 		})
@@ -815,7 +816,7 @@ func (vm *viewModel) renderQuickToggle(c *ui.Context, p palette, key, label stri
 	ui.Row(c.Key(key)).Grow(1).Padding(5, 8).Radius(8).Background(bg).Border(1, bdr).
 		AlignItems(ui.Center).Gap(5).Children(func() {
 		ui.Text(c, label).Grow(1).FontSize(11).TextColor(p.text).NoWrap()
-		if ui.Switch(c.Key(key+"-sw"), val).Changed() {
+		if ui.Switch(c.Key(key+"-sw"), val).Cursor(ui.CursorPointer).Changed() {
 			onToggle(*val)
 		}
 	})
@@ -1012,7 +1013,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 					if inp.Changed() {
 						vm.portDirty = true
 					}
-					saveBtn := ui.PrimaryButton(c.Key("save-port"), "应用").Padding(5, 11).Radius(7)
+					saveBtn := ui.PrimaryButton(c.Key("save-port"), "应用").Padding(5, 11).Radius(7).Cursor(ui.CursorPointer)
 					if saveBtn.Clicked() || inp.Submitted() {
 						port, err := strconv.Atoi(strings.TrimSpace(vm.portDraft))
 						if err != nil || port <= 0 || port > 65535 {
@@ -1091,7 +1092,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 					ui.Text(c, fmt.Sprintf("%d 条生效规则 · %s", snap.RuleCount, geoState)).
 						Grow(1).FontSize(11.5).TextColor(p.textMuted).Ellipsis("…")
 					if ui.Button(c.Key("btn-view-active-rules"), "查看规则").Padding(5, 10).Radius(7).
-						Tooltip("查看全部生效分流规则").Clicked() {
+						Cursor(ui.CursorPointer).Tooltip("查看全部生效分流规则").Clicked() {
 						vm.openActiveRulesModal()
 					}
 					if renderToolbarIconBtn(c, p, "btn-reload-cfg", "重载配置", "重载配置", svgRefresh, false, p.accent, p.accentSoft, p.borderStrong, false) {
@@ -1105,7 +1106,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				themeIdx := themeModeToIndex(vm.currentPrefs().ThemeMode)
 				ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
 					ui.Text(c, "外观").Grow(1).FontSize(12.5).TextColor(p.text)
-					if ui.Segmented(c.Key("theme-seg"), &themeIdx, "跟随系统", "浅色", "深色").Changed() {
+					if renderSegmented(c.Key("theme-seg"), p, &themeIdx, "跟随系统", "浅色", "深色").Changed() {
 						mode := indexToThemeMode(themeIdx)
 						if vm.app != nil {
 							vm.app.setThemeMode(mode)
@@ -1157,7 +1158,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 						ui.Text(c, nonEmpty(logPath, "未启用")).FontSize(11.5).TextColor(p.textSecondary).Wrap()
 					})
 					if ui.Button(c.Key("btn-open-logs"), "打开目录").Padding(5, 11).Radius(7).
-						Tooltip("在文件管理器中定位程序日志文件").Clicked() {
+						Cursor(ui.CursorPointer).Tooltip("在文件管理器中定位程序日志文件").Clicked() {
 						if vm.app != nil {
 							vm.app.openLogDirectory()
 						}
@@ -1184,7 +1185,7 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 					if vm.cliStatusLoaded && vm.cliStatus.Installed {
 						btnLabel = "重新链接"
 					}
-					if ui.Button(c.Key("btn-install-cli"), btnLabel).Disabled(vm.cliInstalling).Padding(5, 11).Radius(7).Clicked() {
+					if applyPointerCursor(ui.Button(c.Key("btn-install-cli"), btnLabel).Disabled(vm.cliInstalling).Padding(5, 11).Radius(7), vm.cliInstalling).Clicked() {
 						if vm.app != nil {
 							vm.cliInstalling = true
 							vm.app.installCLILink()
@@ -1416,10 +1417,53 @@ func renderSettingSwitch(c *ui.Context, p palette, key, title, desc string, val 
 				ui.Text(c, desc).FontSize(11).TextColor(p.textMuted)
 			}
 		})
-		if ui.Switch(c.Key(key+"-sw"), val).Changed() {
+		if ui.Switch(c.Key(key+"-sw"), val).Cursor(ui.CursorPointer).Changed() {
 			onChange(*val)
 		}
 	})
+}
+
+// applyPointerCursor 在控件未禁用时设置手型指针，禁用态保持默认指针。
+func applyPointerCursor(el ui.Element, disabled bool) ui.Element {
+	if !disabled {
+		el.Cursor(ui.CursorPointer)
+	}
+	return el
+}
+
+// renderSegmented 使用 SegmentedBase 渲染分段切换控件，并为每个分段项显式设置手型光标，
+// 避免 mygo 内置 Segmented 子项截断外层 CursorPointer 继承。
+func renderSegmented(c *ui.Context, p palette, selected *int, labels ...string) ui.Element {
+	t := c.Theme()
+	parts := ui.SegmentedBase(c, selected, len(labels))
+	g := parts.Track
+	g.AlignItems(ui.Stretch).Padding(t.Space(0.5)).Gap(t.Space(0.5)).
+		Radius(t.Radius).Background(t.Surface).Border(1, t.Border)
+	selectedBg := t.Background
+	if t.Dark {
+		selectedBg = t.SurfacePressed
+	}
+	segRadius := max(float32(0), t.Radius-2)
+	g.Children(func() {
+		for i, label := range labels {
+			s := parts.Segment(i)
+			s.Padding(t.Space(1.5), t.Space(3.5)).Radius(segRadius).Cursor(ui.CursorPointer)
+			if i == *selected {
+				s.Background(selectedBg).Shadow(0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.12))
+			} else if s.Hovered() {
+				s.Background(t.SurfaceHover)
+			}
+			s.Children(func() {
+				txt := ui.Text(c, label).SingleLine()
+				if i == *selected {
+					txt.TextColor(p.text)
+				} else {
+					txt.TextColor(p.textSecondary)
+				}
+			})
+		}
+	})
+	return g
 }
 
 func renderKVRow(c *ui.Context, p palette, label, val string) {

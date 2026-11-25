@@ -52,10 +52,11 @@ type SpeedSample struct {
 }
 
 const (
-	maxSpeedHistoryPoints        = 48
-	defaultSysProxyCheckInterval = 3 * time.Second
-	defaultConnectPollInterval   = 200 * time.Millisecond
-	defaultConnectPollAttempts   = 40 // 40 * 200ms = 8s，与官方 ProxyService 一致
+	maxSpeedHistoryPoints           = 48
+	defaultSysProxyCheckInterval    = 3 * time.Second
+	defaultConnectPollInterval      = 200 * time.Millisecond
+	defaultConnectPollAttempts      = 40 // 40 * 200ms = 8s，与官方 ProxyService 一致
+	defaultDisconnectErrorThreshold = 8  // 已连上后连续 8 秒底层状态非 0 则转为连接异常提示
 )
 
 // Snapshot 是整个客户端运行状态的只读快照，用于 UI、托盘与本地控制 API。
@@ -128,11 +129,14 @@ type Engine struct {
 	geoIPPath   string
 	ruleCount   int
 
-	state         TunnelState
-	lastError     string
-	systemProxyOn bool
-	proxyStarted  bool
-	syncing       bool
+	state              TunnelState
+	lastError          string
+	tunnelDesired      bool // 用户/启动流程期望隧道保持在线，用于断线后的状态追踪与自动恢复
+	tunnelOpInProgress bool // 正在执行建连/切换/断开操作时暂停后台 sampleStats 写状态，避免竞态
+	disconnectStreak   int  // 连续采样到 TunnelStatus != 0 的次数
+	systemProxyOn      bool
+	proxyStarted       bool
+	syncing            bool
 
 	delays        map[int]int64
 	testingNodes  map[int]bool
@@ -156,10 +160,11 @@ type Engine struct {
 	selfProcNames  []string
 	procTraffic    *processTrafficTracker
 
-	sysProxyCheckInterval time.Duration
-	connectPollInterval   time.Duration
-	connectPollAttempts   int
-	loopsOnce             sync.Once
+	sysProxyCheckInterval    time.Duration
+	connectPollInterval      time.Duration
+	connectPollAttempts      int
+	disconnectErrorThreshold int
+	loopsOnce                sync.Once
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -207,11 +212,12 @@ func New(opts Options) (*Engine, error) {
 		procLookupFn:          lookupLoopbackClients,
 		selfProcNames:         currentSelfProcessNames(),
 		procTraffic:           newProcessTrafficTracker(time.Now()),
-		sysProxyCheckInterval: defaultSysProxyCheckInterval,
-		connectPollInterval:   defaultConnectPollInterval,
-		connectPollAttempts:   defaultConnectPollAttempts,
-		stopCh:                make(chan struct{}),
-		tunnelPingMs:          -1,
+		sysProxyCheckInterval:    defaultSysProxyCheckInterval,
+		connectPollInterval:      defaultConnectPollInterval,
+		connectPollAttempts:      defaultConnectPollAttempts,
+		disconnectErrorThreshold: defaultDisconnectErrorThreshold,
+		stopCh:                   make(chan struct{}),
+		tunnelPingMs:             -1,
 	}
 
 	// 加载 GeoIP（仅真实打开的核心库且非 mock 或文件存在时加载）
@@ -301,6 +307,17 @@ func (e *Engine) Shutdown() {
 
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
+
+	e.mu.Lock()
+	e.tunnelOpInProgress = true
+	e.tunnelDesired = false
+	e.disconnectStreak = 0
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.tunnelOpInProgress = false
+		e.mu.Unlock()
+	}()
 
 	// 退出时自动关闭系统代理，避免系统断网
 	if e.sysProxy != nil {
@@ -478,6 +495,17 @@ func (e *Engine) Disconnect() error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
 
+	e.mu.Lock()
+	e.tunnelOpInProgress = true
+	e.tunnelDesired = false
+	e.disconnectStreak = 0
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.tunnelOpInProgress = false
+		e.mu.Unlock()
+	}()
+
 	e.core.CloseTunnel()
 	e.mu.Lock()
 	e.state = StateDisconnected
@@ -563,7 +591,7 @@ func (e *Engine) SetUDPAcceleration(enabled bool) error {
 
 	e.mu.Lock()
 	e.cfg.UDPAccelerationEnabled = enabled
-	wasActive := e.state == StateConnected || e.state == StateConnecting
+	wasActive := e.tunnelDesired || e.state == StateConnected || e.state == StateConnecting
 	saveErr := e.cfg.Save()
 	e.mu.Unlock()
 
@@ -584,7 +612,7 @@ func (e *Engine) SetNativeUDP(enabled bool) error {
 
 	e.mu.Lock()
 	e.cfg.NativeUDP = enabled
-	wasActive := e.state == StateConnected || e.state == StateConnecting
+	wasActive := e.tunnelDesired || e.state == StateConnected || e.state == StateConnecting
 	saveErr := e.cfg.Save()
 	e.mu.Unlock()
 
@@ -1323,7 +1351,7 @@ func (e *Engine) Reload() error {
 	oldLAN := e.cfg.AllowLanConnection
 	oldUser := e.cfg.ProxyUsername
 	oldPass := e.cfg.ProxyPassword
-	wasActive := e.state == StateConnected || e.state == StateConnecting
+	wasActive := e.tunnelDesired || e.state == StateConnected || e.state == StateConnecting
 	e.mu.RUnlock()
 
 	newCfg, err := config.Load(path)
@@ -1524,18 +1552,29 @@ func (e *Engine) startLocalProxyLocked() error {
 }
 
 func (e *Engine) connectCurrentLocked() error {
-	e.mu.RLock()
+	e.mu.Lock()
+	e.tunnelOpInProgress = true
+	e.disconnectStreak = 0
 	cfg := e.cfg
 	node := cfg.CurrentNode()
 	udpAcc := cfg.UDPAccelerationEnabled
 	nativeUDP := cfg.NativeUDP
-	e.mu.RUnlock()
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.tunnelOpInProgress = false
+		e.mu.Unlock()
+	}()
 
 	if node == nil {
 		err := errors.New("没有可连接的节点")
 		e.mu.Lock()
 		e.state = StateError
+		e.tunnelDesired = false
 		e.lastError = err.Error()
+		e.uploadSpeedBps = 0
+		e.downloadSpeedBps = 0
+		e.tunnelPingMs = -1
 		e.mu.Unlock()
 		e.emit()
 		return err
@@ -1547,6 +1586,9 @@ func (e *Engine) connectCurrentLocked() error {
 	e.mu.Lock()
 	e.state = StateConnecting
 	e.lastError = ""
+	e.uploadSpeedBps = 0
+	e.downloadSpeedBps = 0
+	e.tunnelPingMs = -1
 	e.mu.Unlock()
 	e.emit()
 
@@ -1559,6 +1601,7 @@ func (e *Engine) connectCurrentLocked() error {
 		log.Printf("[engine] 节点建连调用失败 (id=%d name=%q): %v", node.ID, node.DisplayName(), err)
 		e.mu.Lock()
 		e.state = StateError
+		e.tunnelDesired = false
 		e.lastError = err.Error()
 		e.mu.Unlock()
 		e.emit()
@@ -1584,6 +1627,9 @@ func (e *Engine) connectCurrentLocked() error {
 		select {
 		case <-e.stopCh:
 			e.core.CloseTunnel()
+			e.mu.Lock()
+			e.tunnelDesired = false
+			e.mu.Unlock()
 			return errors.New("客户端正在退出")
 		case <-time.After(pollInterval):
 		}
@@ -1598,6 +1644,8 @@ func (e *Engine) connectCurrentLocked() error {
 	e.mu.Lock()
 	if connected {
 		e.state = StateConnected
+		e.tunnelDesired = true
+		e.disconnectStreak = 0
 		e.lastError = ""
 		e.lastUploadBytes = 0
 		e.lastDownloadBytes = 0
@@ -1608,6 +1656,8 @@ func (e *Engine) connectCurrentLocked() error {
 		log.Printf("[engine] 节点已连接: id=%d name=%q ping=%dms", node.ID, node.DisplayName(), e.tunnelPingMs)
 	} else {
 		e.state = StateError
+		e.tunnelDesired = false
+		e.disconnectStreak = 0
 		e.lastError = fmt.Sprintf("连接节点 %s 超时（状态码 %d）", node.DisplayName(), timeoutStatus)
 		log.Printf("[engine] 节点连接超时: id=%d name=%q status=%d", node.ID, node.DisplayName(), timeoutStatus)
 	}
@@ -1635,40 +1685,92 @@ func (e *Engine) statsLoop() {
 }
 
 func (e *Engine) sampleStats(now time.Time) {
-	e.mu.Lock()
-	active := e.state == StateConnected || e.state == StateConnecting
-	e.mu.Unlock()
+	e.mu.RLock()
+	opInProgress := e.tunnelOpInProgress
+	active := e.tunnelDesired || e.state == StateConnected || e.state == StateConnecting
+	e.mu.RUnlock()
 
-	if !active {
+	if opInProgress || !active {
 		return
 	}
 
 	status := e.core.TunnelStatus()
-	// 核心库 get_tunnel_upload / get_tunnel_download 在 1s 周期下直接返回当前每秒上下行字节数（Bytes/s），
-	// 与官方客户端 ProxyService 行为一致，不可对相邻两次读数做差值相减。
-	up := e.core.TunnelUploadBytes()
-	down := e.core.TunnelDownloadBytes()
-	if up < 0 {
-		up = 0
+	var up, down int64
+	var ping int32 = -1
+	if status == 0 {
+		// 核心库 get_tunnel_upload / get_tunnel_download 在 1s 周期下直接返回当前每秒上下行字节数（Bytes/s），
+		// 与官方客户端 ProxyService 行为一致，不可对相邻两次读数做差值相减。
+		up = e.core.TunnelUploadBytes()
+		down = e.core.TunnelDownloadBytes()
+		if up < 0 {
+			up = 0
+		}
+		if down < 0 {
+			down = 0
+		}
+		ping = e.core.TunnelPingDelay()
 	}
-	if down < 0 {
-		down = 0
-	}
-	ping := e.core.TunnelPingDelay()
 
+	var logMsg string
 	e.mu.Lock()
-	if e.state == StateConnecting && status == 0 {
-		e.state = StateConnected
-		e.lastError = ""
+	// 二次确认：避免在读取核心库期间被显式建连/断开操作抢先改写后出现旧状态回写
+	if e.tunnelOpInProgress || !(e.tunnelDesired || e.state == StateConnected || e.state == StateConnecting) {
+		e.mu.Unlock()
+		return
 	}
-	e.uploadSpeedBps = up
-	e.downloadSpeedBps = down
-	e.lastUploadBytes += up
-	e.lastDownloadBytes += down
-	e.lastSampleTime = now
-	e.tunnelPingMs = ping
-	e.appendSpeedSampleLocked(e.uploadSpeedBps, e.downloadSpeedBps)
+
+	nodeName := ""
+	nodeID := 0
+	if cur := e.cfg.CurrentNode(); cur != nil {
+		nodeName = cur.DisplayName()
+		nodeID = cur.ID
+	}
+	threshold := e.disconnectErrorThreshold
+	if threshold <= 0 {
+		threshold = defaultDisconnectErrorThreshold
+	}
+
+	if status == 0 {
+		prevState := e.state
+		e.disconnectStreak = 0
+		if prevState != StateConnected {
+			e.state = StateConnected
+			e.lastError = ""
+			logMsg = fmt.Sprintf("[engine] 隧道已恢复连接: id=%d name=%q ping=%dms", nodeID, nodeName, ping)
+		}
+		e.uploadSpeedBps = up
+		e.downloadSpeedBps = down
+		e.lastUploadBytes += up
+		e.lastDownloadBytes += down
+		e.lastSampleTime = now
+		e.tunnelPingMs = ping
+		e.appendSpeedSampleLocked(up, down)
+	} else {
+		prevState := e.state
+		e.disconnectStreak++
+		e.uploadSpeedBps = 0
+		e.downloadSpeedBps = 0
+		e.lastSampleTime = now
+		e.tunnelPingMs = -1
+		e.appendSpeedSampleLocked(0, 0)
+
+		if e.disconnectStreak >= threshold {
+			e.state = StateError
+			e.lastError = fmt.Sprintf("节点 %s 连接中断（状态码 %d），正在尝试重连", nodeName, status)
+			if prevState != StateError {
+				logMsg = fmt.Sprintf("[engine] 隧道持续断开，已转为连接异常: id=%d name=%q status=%d streak=%d", nodeID, nodeName, status, e.disconnectStreak)
+			}
+		} else if prevState == StateConnected {
+			e.state = StateConnecting
+			e.lastError = ""
+			logMsg = fmt.Sprintf("[engine] 隧道连接中断，正在重连: id=%d name=%q status=%d", nodeID, nodeName, status)
+		}
+	}
 	e.mu.Unlock()
+
+	if logMsg != "" {
+		log.Print(logMsg)
+	}
 
 	// 在后台每秒顺带采样活跃连接以持续累计各进程走代理与直连的流量，
 	// 即使主窗口未打开也能完整记录短连接和后台进程的流量大户。

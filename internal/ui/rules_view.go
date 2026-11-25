@@ -139,7 +139,7 @@ func (vm *viewModel) renderRulesView(c *ui.Context, p palette) {
 		}
 		for _, f := range filters {
 			selected := vm.ruleFilterAction == f.code
-			btn := ui.Button(c.Key(fmt.Sprintf("rf-%d", f.code)), f.label).Padding(5, 8).Radius(7)
+			btn := ui.Button(c.Key(fmt.Sprintf("rf-%d", f.code)), f.label).Padding(5, 8).Radius(7).Cursor(ui.CursorPointer)
 			if selected {
 				btn.Background(p.accentSoft).Border(1, p.borderStrong).TextColor(p.accent)
 			}
@@ -263,7 +263,7 @@ func (vm *viewModel) renderRuleRow(c *ui.Context, p palette, rule config.DomainR
 
 	row.Children(func() {
 		swVal := enabled
-		if ui.Switch(c.Key("sw"), &swVal).Changed() {
+		if ui.Switch(c.Key("sw"), &swVal).Cursor(ui.CursorPointer).Changed() {
 			id := rule.ID
 			vm.runAsync(func() error {
 				_, err := vm.app.eng.ToggleCustomRule(id)

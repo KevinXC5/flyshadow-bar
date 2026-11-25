@@ -85,7 +85,7 @@ func (vm *viewModel) renderConnectionsView(c *ui.Context, p palette) {
 	// 顶部子视图切换：连接列表 / 进程流量
 	ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
 		prevSub := vm.connSubTab
-		if ui.Segmented(c.Key("conn-sub-tab"), &vm.connSubTab, "连接列表", "进程流量").Changed() {
+		if renderSegmented(c.Key("conn-sub-tab"), p, &vm.connSubTab, "连接列表", "进程流量").Changed() {
 			if vm.connSubTab != 0 {
 				vm.connSortMenuOpen = false
 			}
@@ -99,7 +99,7 @@ func (vm *viewModel) renderConnectionsView(c *ui.Context, p palette) {
 			if !vm.procOnlyProxy {
 				scopeIdx = 1
 			}
-			if ui.Segmented(c.Key("proc-scope-seg"), &scopeIdx, "仅代理", "全部").Changed() {
+			if renderSegmented(c.Key("proc-scope-seg"), p, &scopeIdx, "仅代理", "全部").Changed() {
 				vm.procOnlyProxy = scopeIdx == 0
 			}
 		} else if len(vm.connections) > 0 {
@@ -264,7 +264,7 @@ func (vm *viewModel) renderProcessTrafficView(c *ui.Context, p palette) {
 		ui.SearchField(c.Key("proc-search"), &vm.procSearchQuery).Grow(1).Placeholder("搜索进程名…")
 
 		sortIdx := int(vm.procSortField)
-		if ui.Segmented(c.Key("proc-sort-seg"), &sortIdx, "流量", "速率", "连接").Changed() {
+		if renderSegmented(c.Key("proc-sort-seg"), p, &sortIdx, "流量", "速率", "连接").Changed() {
 			vm.procSortField = procSortField(sortIdx)
 		}
 
@@ -639,11 +639,11 @@ func (vm *viewModel) renderConnectionRow(c *ui.Context, p palette, idx int, conn
 		// 右侧快捷操作：加直连 / 加代理 / 断开
 		if conn.TargetAddr != "" {
 			if ui.Button(c.Key("add-direct"), "直连").Padding(3, 7).Radius(6).
-				TextColor(p.success).Tooltip("加为直连规则").Clicked() {
+				TextColor(p.success).Cursor(ui.CursorPointer).Tooltip("加为直连规则").Clicked() {
 				vm.quickAddRuleFromConn(conn, 0)
 			}
 			if ui.Button(c.Key("add-proxy"), "代理").Padding(3, 7).Radius(6).
-				TextColor(p.accent).Tooltip("加为代理规则").Clicked() {
+				TextColor(p.accent).Cursor(ui.CursorPointer).Tooltip("加为代理规则").Clicked() {
 				vm.quickAddRuleFromConn(conn, 2)
 			}
 		}

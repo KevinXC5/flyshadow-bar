@@ -27,7 +27,7 @@ func (vm *viewModel) renderUpdateTopBanner(c *ui.Context, p palette) {
 				if pctLabel != "" {
 					ui.Text(c, pctLabel).FontSize(11).Bold().TextColor(p.accent).NoWrap()
 				}
-				if ui.Button(c.Key("btn-banner-cancel-update"), "取消").Padding(4, 9).Radius(6).Clicked() {
+				if ui.Button(c.Key("btn-banner-cancel-update"), "取消").Padding(4, 9).Radius(6).Cursor(ui.CursorPointer).Clicked() {
 					vm.cancelUpdateDownload()
 				}
 			})
@@ -58,11 +58,11 @@ func (vm *viewModel) renderUpdateTopBanner(c *ui.Context, p palette) {
 			})
 			if hasNewer && vm.updateCanReinstall {
 				if ui.Button(c.Key("btn-banner-supersede"), "下新版").Padding(5, 10).Radius(7).
-					Tooltip("覆盖下载最新版本 " + vm.updateAvailable).Clicked() {
+					Cursor(ui.CursorPointer).Tooltip("覆盖下载最新版本 " + vm.updateAvailable).Clicked() {
 					vm.installNativeUpdate()
 				}
 			}
-			if ui.PrimaryButton(c.Key("btn-banner-restart"), "立即重启").Padding(5, 12).Radius(7).Clicked() {
+			if ui.PrimaryButton(c.Key("btn-banner-restart"), "立即重启").Padding(5, 12).Radius(7).Cursor(ui.CursorPointer).Clicked() {
 				vm.restartForUpdate()
 			}
 		})
@@ -114,24 +114,24 @@ func (vm *viewModel) renderUpdateSection(c *ui.Context, p palette) {
 
 			switch {
 			case vm.updateDownloading:
-				if ui.Button(c.Key("btn-cancel-update"), "取消").Padding(5, 11).Radius(7).Clicked() {
+				if ui.Button(c.Key("btn-cancel-update"), "取消").Padding(5, 11).Radius(7).Cursor(ui.CursorPointer).Clicked() {
 					vm.cancelUpdateDownload()
 				}
 			case vm.updateInstalled:
 				if hasNewer && vm.updateCanReinstall {
-					if ui.Button(c.Key("btn-install-supersede"), "更新至最新版").Padding(5, 10).Radius(7).Clicked() {
+					if ui.Button(c.Key("btn-install-supersede"), "更新至最新版").Padding(5, 10).Radius(7).Cursor(ui.CursorPointer).Clicked() {
 						vm.installNativeUpdate()
 					}
 				}
-				if ui.PrimaryButton(c.Key("btn-restart-update"), "立即重启").Padding(5, 11).Radius(7).Clicked() {
+				if ui.PrimaryButton(c.Key("btn-restart-update"), "立即重启").Padding(5, 11).Radius(7).Cursor(ui.CursorPointer).Clicked() {
 					vm.restartForUpdate()
 				}
 			case vm.updateNativeEnabled && vm.updateAvailable != "":
-				if ui.PrimaryButton(c.Key("btn-install-update"), "立即更新").Padding(5, 11).Radius(7).Clicked() {
+				if ui.PrimaryButton(c.Key("btn-install-update"), "立即更新").Padding(5, 11).Radius(7).Cursor(ui.CursorPointer).Clicked() {
 					vm.installNativeUpdate()
 				}
 			case vm.updateResult != nil && vm.updateResult.HasUpdate && vm.updateResult.ReleaseURL != "":
-				if ui.PrimaryButton(c.Key("btn-open-release"), "前往下载").Padding(5, 11).Radius(7).Clicked() {
+				if ui.PrimaryButton(c.Key("btn-open-release"), "前往下载").Padding(5, 11).Radius(7).Cursor(ui.CursorPointer).Clicked() {
 					releaseURL := vm.updateResult.ReleaseURL
 					if vm.app != nil {
 						go func() { _ = mygo.Shell.OpenExternal(releaseURL) }()
@@ -139,7 +139,7 @@ func (vm *viewModel) renderUpdateSection(c *ui.Context, p palette) {
 				}
 			}
 			if !vm.updateDownloading {
-				if ui.Button(c.Key("btn-check-update"), "检查更新").Disabled(vm.checkingUpdate).Padding(5, 11).Radius(7).Clicked() {
+				if applyPointerCursor(ui.Button(c.Key("btn-check-update"), "检查更新").Disabled(vm.checkingUpdate).Padding(5, 11).Radius(7), vm.checkingUpdate).Clicked() {
 					vm.checkUpdate()
 				}
 			}
