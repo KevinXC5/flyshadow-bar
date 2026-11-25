@@ -1,9 +1,12 @@
 package core
 
 import (
+	"archive/zip"
+	"bytes"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -80,6 +83,167 @@ func TestDarwinJarEntries(t *testing.T) {
 	amd := darwinJarEntries("amd64")
 	if len(amd) == 0 || amd[0] != DarwinAMD64JarEntry {
 		t.Fatalf("darwinJarEntries(amd64) = %v, want %q", amd, DarwinAMD64JarEntry)
+	}
+}
+
+func writeTestJar(t *testing.T, jarPath string, entries map[string][]byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(jarPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(jarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLocateDarwinCoreLibPrefersOfficialJarAndRefreshesCache(t *testing.T) {
+	barDir := t.TempDir()
+	legacyDir := t.TempDir()
+	appDir := t.TempDir()
+	t.Setenv("FLYSHADOW_BAR_DIR", barDir)
+	t.Setenv("FLYSHADOW_CORE_LIB", "")
+
+	// 旧目录遗留旧版动态库（如 ~/.FlyShadow/lib/v2.0.2）
+	legacyLib := filepath.Join(legacyDir, "lib", "v2.0.2", DarwinLibName)
+	if err := os.MkdirAll(filepath.Dir(legacyLib), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyLib, []byte("legacy-v2.0.2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := darwinJarEntries(runtime.GOARCH)[0]
+	jarV1 := filepath.Join(appDir, "common-desktop-aaa.jar")
+	writeTestJar(t, jarV1, map[string][]byte{
+		entry: []byte("jar-v2.0.3-payload"),
+	})
+
+	origOfficial := officialJarsFinder
+	origLegacy := legacyDirResolver
+	origExec := executableDirsFinder
+	t.Cleanup(func() {
+		officialJarsFinder = origOfficial
+		legacyDirResolver = origLegacy
+		executableDirsFinder = origExec
+	})
+	currentJars := []string{jarV1}
+	officialJarsFinder = func() []string { return currentJars }
+	legacyDirResolver = func() (string, error) { return legacyDir, nil }
+	executableDirsFinder = func() []string { return nil }
+
+	// 1. 应优先从官方 JAR 提取，而非命中旧目录 ~/.FlyShadow/lib/v2.0.2
+	got, err := locateDarwinCoreLib()
+	if err != nil {
+		t.Fatalf("locateDarwinCoreLib v1: %v", err)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, []byte("jar-v2.0.3-payload")) {
+		t.Fatalf("got payload %q, want jar-v2.0.3-payload", string(data))
+	}
+
+	// 2. 模拟通过 DMG 更新官方客户端：新 JAR 的 mtime 甚至早于当前缓存文件，仍必须刷新缓存
+	jarV2 := filepath.Join(appDir, "common-desktop-bbb.jar")
+	writeTestJar(t, jarV2, map[string][]byte{
+		entry: []byte("jar-v2.0.4-new-payload"),
+	})
+	older := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(jarV2, older, older); err != nil {
+		t.Fatal(err)
+	}
+	currentJars = []string{jarV2}
+
+	got2, err := locateDarwinCoreLib()
+	if err != nil {
+		t.Fatalf("locateDarwinCoreLib v2: %v", err)
+	}
+	data2, err := os.ReadFile(got2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data2, []byte("jar-v2.0.4-new-payload")) {
+		t.Fatalf("cache did not refresh on JAR update: got %q", string(data2))
+	}
+
+	// 3. 当官方 JAR 不存在时，按顺序回退至 ~/.FlyShadow/lib，再回退至已有缓存
+	currentJars = nil
+	gotLegacy, err := locateDarwinCoreLib()
+	if err != nil {
+		t.Fatalf("locateDarwinCoreLib legacy fallback: %v", err)
+	}
+	if gotLegacy != legacyLib {
+		t.Fatalf("expected legacy fallback %s, got %s", legacyLib, gotLegacy)
+	}
+	if err := os.Remove(legacyLib); err != nil {
+		t.Fatal(err)
+	}
+	gotCache, err := locateDarwinCoreLib()
+	if err != nil {
+		t.Fatalf("locateDarwinCoreLib cache fallback: %v", err)
+	}
+	if gotCache != got2 {
+		t.Fatalf("expected cache fallback %s, got %s", got2, gotCache)
+	}
+}
+
+func TestLocateGeoIPRefreshesFromOfficialJar(t *testing.T) {
+	barDir := t.TempDir()
+	legacyDir := t.TempDir()
+	appDir := t.TempDir()
+	t.Setenv("FLYSHADOW_BAR_DIR", barDir)
+	t.Setenv("FLYSHADOW_GEOIP", "")
+
+	jar1 := filepath.Join(appDir, "common-desktop-111.jar")
+	writeTestJar(t, jar1, map[string][]byte{
+		GeoIPJarEntry: []byte("geoip-v1"),
+	})
+
+	origOfficial := officialJarsFinder
+	origLegacy := legacyDirResolver
+	origExec := executableDirsFinder
+	t.Cleanup(func() {
+		officialJarsFinder = origOfficial
+		legacyDirResolver = origLegacy
+		executableDirsFinder = origExec
+	})
+	currentJars := []string{jar1}
+	officialJarsFinder = func() []string { return currentJars }
+	legacyDirResolver = func() (string, error) { return legacyDir, nil }
+	executableDirsFinder = func() []string { return nil }
+
+	_, b1, err := LocateGeoIP()
+	if err != nil || !bytes.Equal(b1, []byte("geoip-v1")) {
+		t.Fatalf("LocateGeoIP v1 = (%q, %v), want geoip-v1", string(b1), err)
+	}
+
+	jar2 := filepath.Join(appDir, "common-desktop-222.jar")
+	writeTestJar(t, jar2, map[string][]byte{
+		GeoIPJarEntry: []byte("geoip-v2-updated"),
+	})
+	currentJars = []string{jar2}
+
+	_, b2, err := LocateGeoIP()
+	if err != nil || !bytes.Equal(b2, []byte("geoip-v2-updated")) {
+		t.Fatalf("LocateGeoIP v2 = (%q, %v), want geoip-v2-updated", string(b2), err)
 	}
 }
 
@@ -170,7 +334,7 @@ func TestLiveCoreSmoke(t *testing.T) {
 		t.Fatalf("ConnectTunnel: %v", err)
 	}
 	connected := false
-	for i := 0; i < 16; i++ {
+	for i := 0; i < 32; i++ {
 		if c.TunnelStatus() == 0 {
 			connected = true
 			break
@@ -180,7 +344,7 @@ func TestLiveCoreSmoke(t *testing.T) {
 	t.Logf("隧道建连轮询结果: connected=%v status=%d ping=%dms up=%d down=%d",
 		connected, c.TunnelStatus(), c.TunnelPingDelay(), c.TunnelUploadBytes(), c.TunnelDownloadBytes())
 	if !connected {
-		t.Fatalf("隧道在 4s 内未就绪 (status=%d)", c.TunnelStatus())
+		t.Fatalf("隧道在 8s 内未就绪 (status=%d)", c.TunnelStatus())
 	}
 
 	// 验证 UDP 开关热切换重连

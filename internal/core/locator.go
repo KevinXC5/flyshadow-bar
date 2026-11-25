@@ -25,6 +25,12 @@ const (
 	WindowsJarEntry     = "win32-x86-64/flyshadow_core_lib.dll"
 )
 
+var (
+	officialJarsFinder   = findOfficialJars
+	legacyDirResolver    = config.LegacyDir
+	executableDirsFinder = executableCandidateDirs
+)
+
 func darwinJarEntries(goarch string) []string {
 	switch goarch {
 	case "amd64":
@@ -64,8 +70,8 @@ func LocateGeoIP() (string, []byte, error) {
 		return envPath, b, nil
 	}
 
-	candidates := commonAssetDirs()
-	for _, dir := range candidates {
+	// 1. 程序目录及 ~/.flyshadowbar 显式放置的 GeoIP 文件（不含自动解压缓存目录）
+	for _, dir := range geoIPExplicitDirs() {
 		p := filepath.Join(dir, GeoIPFileName)
 		if isRegularFile(p) {
 			b, err := os.ReadFile(p)
@@ -75,8 +81,8 @@ func LocateGeoIP() (string, []byte, error) {
 		}
 	}
 
-	// 尝试从官方 common-desktop-*.jar 提取并缓存
-	for _, jarPath := range findOfficialJars() {
+	// 2. 优先从官方 common-desktop-*.jar 提取并按内容指纹自动刷新缓存
+	for _, jarPath := range officialJarsFinder() {
 		cachePath, err := extractFromJarCached(jarPath, GeoIPJarEntry, GeoIPFileName)
 		if err == nil {
 			b, readErr := os.ReadFile(cachePath)
@@ -86,40 +92,41 @@ func LocateGeoIP() (string, []byte, error) {
 		}
 	}
 
+	// 3. 兜底回退至已有缓存及原版 ~/.FlyShadow 目录
+	for _, dir := range geoIPFallbackDirs() {
+		p := filepath.Join(dir, GeoIPFileName)
+		if isRegularFile(p) {
+			b, err := os.ReadFile(p)
+			if err == nil && len(b) > 0 {
+				return p, b, nil
+			}
+		}
+	}
+
 	return "", nil, errors.New("未找到 Country-only-cn-private.mmdb GeoIP 数据库")
 }
 
 func locateDarwinCoreLib() (string, error) {
 	// 1. 程序同级目录 & .app/Contents/Resources
-	for _, dir := range executableCandidateDirs() {
+	for _, dir := range executableDirsFinder() {
 		p := filepath.Join(dir, DarwinLibName)
 		if isRegularFile(p) {
 			return p, nil
 		}
 	}
 
-	// 2. ~/.flyshadowbar/lib/<最新版本> 及 ~/.flyshadowbar/cache
+	// 2. ~/.flyshadowbar/lib/<最新版本>（用户显式放置的覆盖版本）
 	if dir, err := config.DefaultDir(); err == nil {
 		if p, ok := findLatestVersionedLib(filepath.Join(dir, "lib"), DarwinLibName); ok {
 			return p, nil
 		}
 	}
+
+	// 3. 优先从 /Applications/FlyShadow.app/Contents/app/common-desktop-*.jar 自动解压并按内容指纹刷新缓存。
+	// 官方新版客户端已直接随 JAR 分发核心库（不再更新 ~/.FlyShadow/lib），必须先于旧目录与离线缓存检查，
+	// 避免用户更新官方客户端后仍误加载旧版核心库。
 	cacheFileName := fmt.Sprintf("darwin-%s-%s", runtime.GOARCH, DarwinLibName)
-	if cacheDir, err := config.CacheDir(); err == nil {
-		if p := filepath.Join(cacheDir, cacheFileName); isRegularFile(p) {
-			return p, nil
-		}
-	}
-
-	// 3. 只读兼容原版 ~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib
-	if legacyDir, err := config.LegacyDir(); err == nil {
-		if p, ok := findLatestVersionedLib(filepath.Join(legacyDir, "lib"), DarwinLibName); ok {
-			return p, nil
-		}
-	}
-
-	// 4. 从 /Applications/FlyShadow.app/Contents/app/common-desktop-*.jar 自动解压并缓存至 ~/.flyshadowbar/cache
-	for _, jarPath := range findOfficialJars() {
+	for _, jarPath := range officialJarsFinder() {
 		for _, entry := range darwinJarEntries(runtime.GOARCH) {
 			if extracted, err := extractFromJarCached(jarPath, entry, cacheFileName); err == nil {
 				return extracted, nil
@@ -127,38 +134,47 @@ func locateDarwinCoreLib() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("未找到 %s（已检查程序目录、~/.flyshadowbar、~/.FlyShadow/lib 与 /Applications/FlyShadow.app）", DarwinLibName)
+	// 4. 只读兼容原版 ~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib
+	if legacyDir, err := legacyDirResolver(); err == nil {
+		if p, ok := findLatestVersionedLib(filepath.Join(legacyDir, "lib"), DarwinLibName); ok {
+			return p, nil
+		}
+	}
+
+	// 5. 兜底复用 ~/.flyshadowbar/cache 中已缓存的动态库（例如官方客户端已卸载的场景）
+	if cacheDir, err := config.CacheDir(); err == nil {
+		if p := filepath.Join(cacheDir, cacheFileName); isRegularFile(p) {
+			return p, nil
+		}
+	}
+
+	return "", fmt.Errorf("未找到 %s（已检查程序目录、~/.flyshadowbar、/Applications/FlyShadow.app 与 ~/.FlyShadow/lib）", DarwinLibName)
 }
 
 func locateWindowsCoreLib() (string, error) {
 	// 1. 程序同级目录
-	for _, dir := range executableCandidateDirs() {
+	for _, dir := range executableDirsFinder() {
 		p := filepath.Join(dir, WindowsLibName)
 		if isRegularFile(p) {
 			return p, nil
 		}
 	}
 
-	// 2. %USERPROFILE%\.flyshadowbar\lib\<最新版本> 及 cache
+	// 2. %USERPROFILE%\.flyshadowbar\lib\<最新版本>（用户显式放置的覆盖版本）
 	if dir, err := config.DefaultDir(); err == nil {
 		if p, ok := findLatestVersionedLib(filepath.Join(dir, "lib"), WindowsLibName); ok {
 			return p, nil
 		}
 	}
-	if cacheDir, err := config.CacheDir(); err == nil {
-		if p := filepath.Join(cacheDir, WindowsLibName); isRegularFile(p) {
-			return p, nil
+
+	// 3. 优先从安装目录内的 common-desktop-*.jar 提取并按内容指纹自动刷新缓存
+	for _, jarPath := range officialJarsFinder() {
+		if extracted, err := extractFromJarCached(jarPath, WindowsJarEntry, WindowsLibName); err == nil {
+			return extracted, nil
 		}
 	}
 
-	// 3. 只读兼容原版 %USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll
-	if legacyDir, err := config.LegacyDir(); err == nil {
-		if p, ok := findLatestVersionedLib(filepath.Join(legacyDir, "lib"), WindowsLibName); ok {
-			return p, nil
-		}
-	}
-
-	// 4. Windows 常见安装目录
+	// 4. Windows 常见安装目录中的独立 DLL
 	for _, dir := range windowsInstallDirs() {
 		for _, sub := range []string{"", "app", "lib", "resources"} {
 			p := filepath.Join(dir, sub, WindowsLibName)
@@ -168,14 +184,21 @@ func locateWindowsCoreLib() (string, error) {
 		}
 	}
 
-	// 5. 从安装目录内的 common-desktop-*.jar 提取并缓存至 %USERPROFILE%\.flyshadowbar\cache
-	for _, jarPath := range findOfficialJars() {
-		if extracted, err := extractFromJarCached(jarPath, WindowsJarEntry, WindowsLibName); err == nil {
-			return extracted, nil
+	// 5. 只读兼容原版 %USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll
+	if legacyDir, err := legacyDirResolver(); err == nil {
+		if p, ok := findLatestVersionedLib(filepath.Join(legacyDir, "lib"), WindowsLibName); ok {
+			return p, nil
 		}
 	}
 
-	return "", fmt.Errorf("未找到 %s（已检查程序目录、%%USERPROFILE%%\\.flyshadowbar、%%USERPROFILE%%\\.FlyShadow\\lib 与 FlyShadow 常见安装目录）", WindowsLibName)
+	// 6. 兜底复用 %USERPROFILE%\.flyshadowbar\cache 中已缓存的动态库
+	if cacheDir, err := config.CacheDir(); err == nil {
+		if p := filepath.Join(cacheDir, WindowsLibName); isRegularFile(p) {
+			return p, nil
+		}
+	}
+
+	return "", fmt.Errorf("未找到 %s（已检查程序目录、%%USERPROFILE%%\\.flyshadowbar、FlyShadow 常见安装目录与 %%USERPROFILE%%\\.FlyShadow\\lib）", WindowsLibName)
 }
 
 func executableCandidateDirs() []string {
@@ -197,17 +220,24 @@ func executableCandidateDirs() []string {
 	return dirs
 }
 
-func commonAssetDirs() []string {
-	dirs := executableCandidateDirs()
+func geoIPExplicitDirs() []string {
+	dirs := executableDirsFinder()
 	if cfgDir, err := config.DefaultDir(); err == nil {
 		dirs = append(dirs,
 			cfgDir,
 			filepath.Join(cfgDir, "geoip"),
-			filepath.Join(cfgDir, "cache"),
 		)
 	}
+	return dirs
+}
+
+func geoIPFallbackDirs() []string {
+	var dirs []string
+	if cacheDir, err := config.CacheDir(); err == nil {
+		dirs = append(dirs, cacheDir)
+	}
 	// 只读兼容原版 ~/.FlyShadow 中已有的 GeoIP 文件
-	if legacyDir, err := config.LegacyDir(); err == nil {
+	if legacyDir, err := legacyDirResolver(); err == nil {
 		dirs = append(dirs,
 			legacyDir,
 			filepath.Join(legacyDir, "geoip"),
@@ -254,7 +284,14 @@ func findOfficialJars() []string {
 			jars = append(jars, matches...)
 		}
 	}
-	sort.Strings(jars)
+	sort.Slice(jars, func(i, j int) bool {
+		si, ei := os.Stat(jars[i])
+		sj, ej := os.Stat(jars[j])
+		if ei == nil && ej == nil && !si.ModTime().Equal(sj.ModTime()) {
+			return si.ModTime().After(sj.ModTime())
+		}
+		return jars[i] < jars[j]
+	})
 	return jars
 }
 
@@ -330,15 +367,7 @@ func extractFromJarCached(jarPath, entryName, outFileName string) (string, error
 		return "", err
 	}
 	outPath := filepath.Join(cacheDir, outFileName)
-
-	jarInfo, err := os.Stat(jarPath)
-	if err != nil {
-		return "", err
-	}
-	// 如果缓存文件已存在且不早于 JAR，直接复用
-	if outInfo, err := os.Stat(outPath); err == nil && outInfo.Size() > 0 && !outInfo.ModTime().Before(jarInfo.ModTime()) {
-		return outPath, nil
-	}
+	metaPath := outPath + ".meta"
 
 	zr, err := zip.OpenReader(jarPath)
 	if err != nil {
@@ -355,6 +384,15 @@ func extractFromJarCached(jarPath, entryName, outFileName string) (string, error
 	}
 	if target == nil {
 		return "", fmt.Errorf("JAR 中未包含 %s", entryName)
+	}
+
+	// 使用 JAR 文件名 + 条目名 + CRC32 + 原始大小作为内容指纹，
+	// 避免官方客户端通过 DMG/安装包升级后 JAR 修改时间早于旧缓存而误判命中。
+	stamp := fmt.Sprintf("%s|%s|%08x|%d", filepath.Base(jarPath), entryName, target.CRC32, target.UncompressedSize64)
+	if outInfo, err := os.Stat(outPath); err == nil && outInfo.Size() > 0 && outInfo.Size() == int64(target.UncompressedSize64) {
+		if saved, metaErr := os.ReadFile(metaPath); metaErr == nil && strings.TrimSpace(string(saved)) == stamp {
+			return outPath, nil
+		}
 	}
 
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
@@ -392,6 +430,8 @@ func extractFromJarCached(jarPath, entryName, outFileName string) (string, error
 		return "", err
 	}
 	cleanup = false
+
+	_ = os.WriteFile(metaPath, []byte(stamp+"\n"), 0o644)
 	return outPath, nil
 }
 

@@ -20,6 +20,8 @@ type mockCore struct {
 	udpMode      core.ProxyMode
 	nativeUDP    bool
 	connected    bool
+	neverConnect bool
+	closeCalls   int
 	lastHost     string
 	lastPort     int
 	lastQuic     bool
@@ -84,7 +86,7 @@ func (m *mockCore) ConnectTunnel(host string, port int, _ string, enableQuic boo
 	m.lastHost = host
 	m.lastPort = port
 	m.lastQuic = enableQuic
-	m.connected = true
+	m.connected = !m.neverConnect
 	m.mu.Unlock()
 	return nil
 }
@@ -92,6 +94,7 @@ func (m *mockCore) ConnectTunnel(host string, port int, _ string, enableQuic boo
 func (m *mockCore) CloseTunnel() int32 {
 	m.mu.Lock()
 	m.connected = false
+	m.closeCalls++
 	m.mu.Unlock()
 	return 0
 }
@@ -543,5 +546,40 @@ func TestEngineRefreshSystemProxyAndDirectSpeedSampling(t *testing.T) {
 	snap := eng.Snapshot()
 	if snap.DownloadSpeedBps != 5*1024*1024 || snap.UploadSpeedBps != 128000 {
 		t.Fatalf("speed sampling mismatch: down=%d up=%d", snap.DownloadSpeedBps, snap.UploadSpeedBps)
+	}
+}
+
+func TestEngineConnectClosesOldTunnelAndCleansUpOnTimeout(t *testing.T) {
+	cfgPath := writeTestConfig(t)
+	mc := &mockCore{neverConnect: true}
+	sp := &mockSysProxy{}
+
+	eng, err := New(Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          mc,
+		SysProxy:            sp,
+		DisableAutoSysProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	eng.connectPollInterval = 5 * time.Millisecond
+	eng.connectPollAttempts = 3
+
+	if err := eng.Connect(); err == nil {
+		t.Fatalf("expected connect timeout error")
+	}
+	snap := eng.Snapshot()
+	if snap.State != StateError {
+		t.Fatalf("state = %q, want %q", snap.State, StateError)
+	}
+	mc.mu.Lock()
+	closes := mc.closeCalls
+	mc.mu.Unlock()
+	// 建连前关闭一次 + 超时后清理关闭一次
+	if closes != 2 {
+		t.Fatalf("closeCalls = %d, want 2 (before connect + on timeout)", closes)
 	}
 }

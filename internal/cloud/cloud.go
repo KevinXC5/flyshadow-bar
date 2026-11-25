@@ -31,6 +31,8 @@ var (
 		"https://doh.pub/dns-query?name=_cdn.hkspeedup.com&type=TXT",
 		"https://dns.alidns.com/resolve?name=_cdn.hkspeedup.com&type=TXT",
 		"https://1.1.1.1/dns-query?name=_cdn.hkspeedup.com&type=TXT",
+		"https://1.0.0.1/dns-query?name=_cdn.hkspeedup.com&type=TXT",
+		"https://cloudflare-dns.com/dns-query?name=_cdn.hkspeedup.com&type=TXT",
 		"https://dns.google/resolve?name=_cdn.hkspeedup.com&type=TXT",
 	}
 	defaultFallbackBaseURLs = []string{

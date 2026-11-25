@@ -100,23 +100,25 @@ FlyShadow Bar 使用独立主目录保存配置、界面偏好、运行态文件
 
 - **macOS**（`libflyshadow_core_lib.dylib`）：
   1. 可执行文件同级目录、`.app/Contents/Resources`、`.app/Contents/Frameworks` 及当前工作目录。
-  2. `~/.flyshadowbar/lib/<最新版本>/` 与 `~/.flyshadowbar/cache/`。
-  3. 只读兼容 `~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib`（按语义化版本号降序选取）。
-  4. 自动扫描 `/Applications/FlyShadow.app/Contents/app/common-desktop-*.jar`（及 `~/Applications/` 下对应路径），按当前架构自动解压 `darwin-aarch64/libflyshadow_core_lib.dylib`（Apple Silicon）或 `darwin-x86-64/libflyshadow_core_lib.dylib`（Intel）并缓存至 `~/.flyshadowbar/cache/`。
+  2. `~/.flyshadowbar/lib/<最新版本>/` 显式放入的核心库（按语义化版本号降序选取）。
+  3. 自动扫描 `/Applications/FlyShadow.app/Contents/app/common-desktop-*.jar`（及 `~/Applications/` 下对应路径），按当前架构提取 `darwin-aarch64/libflyshadow_core_lib.dylib`（Apple Silicon）或 `darwin-x86-64/libflyshadow_core_lib.dylib`（Intel）并按条目内容指纹（CRC32 与大小）缓存刷新至 `~/.flyshadowbar/cache/`，官方客户端升级后自动同步最新核心库。
+  4. 只读兼容 `~/.FlyShadow/lib/<最新版本>/libflyshadow_core_lib.dylib`（按语义化版本号降序选取）。
+  5. 回退使用 `~/.flyshadowbar/cache/` 中已缓存的离线副本（卸载官方客户端后仍可继续运行）。
 - **Windows**（`flyshadow_core_lib.dll`）：
   1. 可执行文件同级目录及当前工作目录。
-  2. `%USERPROFILE%\.flyshadowbar\lib\<最新版本>\` 与 `%USERPROFILE%\.flyshadowbar\cache\`。
-  3. 只读兼容 `%USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll`。
-  4. 常见安装目录（`%LOCALAPPDATA%`、`%ProgramFiles%`、`%ProgramFiles(x86)%` 下的 `FlyShadow` 与 `Programs\FlyShadow`，及其 `app`、`lib`、`resources` 子目录）。
-  5. 自动扫描上述安装目录内的 `common-desktop-*.jar`，解压 `win32-x86-64/flyshadow_core_lib.dll` 并缓存至 `%USERPROFILE%\.flyshadowbar\cache\`。
+  2. `%USERPROFILE%\.flyshadowbar\lib\<最新版本>\` 显式放入的核心库（按语义化版本号降序选取）。
+  3. 自动扫描常见官方安装目录（`%LOCALAPPDATA%`、`%ProgramFiles%`、`%ProgramFiles(x86)%` 下的 `FlyShadow` 与 `Programs\FlyShadow`）内的 `common-desktop-*.jar`，按条目内容指纹提取并缓存刷新 `win32-x86-64/flyshadow_core_lib.dll` 至 `%USERPROFILE%\.flyshadowbar\cache\`；其次查找上述安装目录及其 `app`、`lib`、`resources` 子目录中直接释放的 `.dll`。
+  4. 只读兼容 `%USERPROFILE%\.FlyShadow\lib\<最新版本>\flyshadow_core_lib.dll`。
+  5. 回退使用 `%USERPROFILE%\.flyshadowbar\cache\` 中已缓存的离线副本。
 
 ### GeoIP 数据库
 
 按以下优先级查找 `Country-only-cn-private.mmdb`：
 
 1. 环境变量 `FLYSHADOW_GEOIP` 指定的路径。
-2. 可执行文件候选目录、`~/.flyshadowbar`（含 `geoip` / `cache`）及只读兼容 `~/.FlyShadow`（含 `geoip`）。
-3. 自动从官方 `common-desktop-*.jar` 中的 `geoip/Country-only-cn-private.mmdb` 解压并缓存至 `~/.flyshadowbar/cache/`。
+2. 可执行文件候选目录与 `~/.flyshadowbar`（含 `geoip` 子目录）中显式放置的文件。
+3. 自动从官方 `common-desktop-*.jar` 中的 `geoip/Country-only-cn-private.mmdb` 按条目内容指纹提取并缓存刷新至 `~/.flyshadowbar/cache/`。
+4. 只读兼容 `~/.FlyShadow`（含 `geoip` 子目录），并回退使用 `~/.flyshadowbar/cache/` 离线副本。
 
 ### 环境变量一览
 

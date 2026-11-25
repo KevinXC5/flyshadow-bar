@@ -54,6 +54,8 @@ type SpeedSample struct {
 const (
 	maxSpeedHistoryPoints        = 48
 	defaultSysProxyCheckInterval = 3 * time.Second
+	defaultConnectPollInterval   = 200 * time.Millisecond
+	defaultConnectPollAttempts   = 40 // 40 * 200ms = 8s，与官方 ProxyService 一致
 )
 
 // Snapshot 是整个客户端运行状态的只读快照，用于 UI、托盘与本地控制 API。
@@ -153,6 +155,8 @@ type Engine struct {
 	selfProcNames []string
 
 	sysProxyCheckInterval time.Duration
+	connectPollInterval   time.Duration
+	connectPollAttempts   int
 	loopsOnce             sync.Once
 
 	stopCh   chan struct{}
@@ -201,6 +205,8 @@ func New(opts Options) (*Engine, error) {
 		procLookupFn:          lookupLoopbackClients,
 		selfProcNames:         currentSelfProcessNames(),
 		sysProxyCheckInterval: defaultSysProxyCheckInterval,
+		connectPollInterval:   defaultConnectPollInterval,
+		connectPollAttempts:   defaultConnectPollAttempts,
 		stopCh:                make(chan struct{}),
 		tunnelPingMs:          -1,
 	}
@@ -1505,6 +1511,9 @@ func (e *Engine) connectCurrentLocked() error {
 	e.mu.Unlock()
 	e.emit()
 
+	// 先关闭可能残留的旧隧道会话，避免轮询误读上一节点的就绪状态（与官方 reSelectTunnel 一致）
+	e.core.CloseTunnel()
+
 	// 先更新原生 UDP 选项，再建连（支持热切节点与热切 UDP/QUIC 参数）
 	e.core.SetNativeUDP(decision.EnableNativeUDP)
 	if err := e.core.ConnectTunnel(node.Host, node.Port, node.Password, decision.EnableQuic); err != nil {
@@ -1517,18 +1526,34 @@ func (e *Engine) connectCurrentLocked() error {
 		return err
 	}
 
-	// 轮询等待核心库确认隧道就绪（status == 0 表示已连接）
+	pollInterval := e.connectPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultConnectPollInterval
+	}
+	pollAttempts := e.connectPollAttempts
+	if pollAttempts <= 0 {
+		pollAttempts = defaultConnectPollAttempts
+	}
+
+	// 轮询等待核心库确认隧道就绪（status == 0 表示已连接；默认最多等待 8 秒，与官方 ProxyService 一致）
 	connected := false
-	for i := 0; i < 20; i++ {
+	for i := 0; i < pollAttempts; i++ {
 		if e.core.TunnelStatus() == 0 {
 			connected = true
 			break
 		}
 		select {
 		case <-e.stopCh:
+			e.core.CloseTunnel()
 			return errors.New("客户端正在退出")
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(pollInterval):
 		}
+	}
+
+	var timeoutStatus int32
+	if !connected {
+		timeoutStatus = e.core.TunnelStatus()
+		e.core.CloseTunnel()
 	}
 
 	e.mu.Lock()
@@ -1543,10 +1568,9 @@ func (e *Engine) connectCurrentLocked() error {
 		e.tunnelPingMs = e.core.TunnelPingDelay()
 		log.Printf("[engine] 节点已连接: id=%d name=%q ping=%dms", node.ID, node.DisplayName(), e.tunnelPingMs)
 	} else {
-		st := e.core.TunnelStatus()
 		e.state = StateError
-		e.lastError = fmt.Sprintf("连接节点 %s 超时（状态码 %d）", node.DisplayName(), st)
-		log.Printf("[engine] 节点连接超时: id=%d name=%q status=%d", node.ID, node.DisplayName(), st)
+		e.lastError = fmt.Sprintf("连接节点 %s 超时（状态码 %d）", node.DisplayName(), timeoutStatus)
+		log.Printf("[engine] 节点连接超时: id=%d name=%q status=%d", node.ID, node.DisplayName(), timeoutStatus)
 	}
 	e.mu.Unlock()
 	e.emit()
