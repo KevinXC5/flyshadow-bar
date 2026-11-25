@@ -130,3 +130,72 @@ func TestTruncateMenuTextAndErrorHeader(t *testing.T) {
 		t.Fatalf("error subtitle should be truncated within %d cols, got %d (%q)", trayMenuErrorMaxCols, menuDisplayCols(sub), sub)
 	}
 }
+
+func TestTrayMenuPatchDiffOnlyWritesChangedFields(t *testing.T) {
+	snap := engine.Snapshot{
+		State:                  engine.StateConnected,
+		ModeCode:               core.ProxyModeRule,
+		ProxyPort:              7890,
+		SystemProxy:            true,
+		UDPAccelerationEnabled: true,
+		NativeUDP:              false,
+		HasCloudAuth:           true,
+		UploadSpeedBps:         0,
+		DownloadSpeedBps:       0,
+		CurrentNode: &engine.NodeSnapshot{
+			ID:          1,
+			DisplayName: "香港 01",
+			Selected:    true,
+			DelayMs:     36,
+		},
+		Nodes: []engine.NodeSnapshot{
+			{ID: 1, DisplayName: "香港 01", Selected: true, DelayMs: 36},
+			{ID: 2, DisplayName: "日本 01", Selected: false, DelayMs: 88},
+		},
+	}
+
+	for _, goos := range []string{"darwin", "windows"} {
+		tc := &trayController{}
+		tc.menu = tc.buildMenuForOS(snap, goos)
+
+		// 相同快照重复刷新时不应触发任何原生菜单项写入，避免无谓重绘与闪烁。
+		if n := tc.patchMenuInPlaceForOS(snap, goos); n != 0 {
+			t.Fatalf("%s: expected 0 writes for unchanged snapshot, got %d", goos, n)
+		}
+
+		// 仅网速变化时只更新网速显示项 1 次。
+		speedSnap := snap
+		speedSnap.DownloadSpeedBps = 1024
+		if n := tc.patchMenuInPlaceForOS(speedSnap, goos); n != 1 {
+			t.Fatalf("%s: expected 1 write for speed-only change, got %d", goos, n)
+		}
+		if n := tc.patchMenuInPlaceForOS(speedSnap, goos); n != 0 {
+			t.Fatalf("%s: expected 0 writes after speed settled, got %d", goos, n)
+		}
+
+		// 切换代理模式（Radio 组）时仅需 1 次 SetChecked(true)，同组旧项自动取消勾选。
+		modeSnap := speedSnap
+		modeSnap.ModeCode = core.ProxyModeGlobal
+		if n := tc.patchMenuInPlaceForOS(modeSnap, goos); n != 1 {
+			t.Fatalf("%s: expected 1 write for radio mode switch, got %d", goos, n)
+		}
+		if tc.menu.ItemByID("mode-rule").IsChecked() || !tc.menu.ItemByID("mode-global").IsChecked() || tc.menu.ItemByID("mode-direct").IsChecked() {
+			t.Fatalf("%s: unexpected radio states after mode switch", goos)
+		}
+	}
+}
+
+func TestTrayContextMenuPlatformStrategy(t *testing.T) {
+	if !usesOnDemandContextMenu("darwin") || !usesOnDemandContextMenu("windows") {
+		t.Fatalf("darwin and windows should both use on-demand right-click context menus")
+	}
+	if usesOnDemandContextMenu("linux") {
+		t.Fatalf("linux should keep persistent menu attached to tray")
+	}
+	if !buildsFreshMenuOnRightClick("windows") {
+		t.Fatalf("windows should build a fresh menu on right-click to prevent Win11 acrylic redraw flicker")
+	}
+	if buildsFreshMenuOnRightClick("darwin") || buildsFreshMenuOnRightClick("linux") {
+		t.Fatalf("darwin and linux should keep in-place menu patching")
+	}
+}

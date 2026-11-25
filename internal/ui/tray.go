@@ -32,13 +32,31 @@ type trayController struct {
 	tray           *mygo.Tray
 	menu           *mygo.Menu
 	lastNodeSig    string
+	lastToolTip    string
 	lastConnected  bool
 	lastSpeedKey   string
 	lastSpeedDraw  time.Time
 	nowFn          func() time.Time
 	hasInitialized bool
+	menuOpen       bool
 	iconConnected  []byte
 	iconIdle       []byte
+}
+
+// usesOnDemandContextMenu 判断当前平台是否应保持托盘常驻 Menu 为 nil，
+// 并在 OnRightClick 回调中按需弹出菜单：
+// - macOS：常驻 Menu 会拦截左键点击，导致无法触发 OnClick 弹出主窗口；
+// - Windows：按需在右键时弹出并卸载 Menu，可避免菜单打开期间被后台定时刷新触发 SetMenuItemInfoW
+//   引发 Windows 11 亚克力自绘菜单单帧透明闪烁，同时保持左键弹主窗口、右键弹菜单的一致交互。
+func usesOnDemandContextMenu(goos string) bool {
+	return goos == "darwin" || goos == "windows"
+}
+
+// buildsFreshMenuOnRightClick 判断是否在右键弹出时按最新快照即时构建全新菜单，
+// 不复用常驻菜单对象也不在后台对其调用 SetLabel/SetChecked，从而彻底避免异步 postMain
+// 队列中的旧 UpdateMenuItem 落到刚打开或正打开的 Win32 亚克力菜单上造成闪烁。
+func buildsFreshMenuOnRightClick(goos string) bool {
+	return goos == "windows"
 }
 
 func newTrayController(app *App) (*trayController, error) {
@@ -52,9 +70,12 @@ func newTrayController(app *App) (*trayController, error) {
 	}
 
 	snap := app.eng.Snapshot()
-	tc.menu = tc.buildMenu(snap)
-	tc.lastNodeSig = tc.menuSignature(snap)
+	if !buildsFreshMenuOnRightClick(runtime.GOOS) {
+		tc.menu = tc.buildMenu(snap)
+		tc.lastNodeSig = tc.menuSignature(snap)
+	}
 	tc.lastConnected = snap.State == engine.StateConnected
+	tc.lastToolTip = trayTooltip(snap)
 	tc.hasInitialized = true
 
 	icon := iconIdle
@@ -62,11 +83,10 @@ func newTrayController(app *App) (*trayController, error) {
 		icon = iconConn
 	}
 
-	// macOS 上若给 Tray 设置常驻 Menu，左键会直接弹菜单而无法触发 OnClick；
-	// 因此 macOS 保持 Menu 为 nil，左键弹/收主窗口，右键（或 Control+点击）临时弹出快捷菜单。
-	// Windows 后端在左键始终触发 OnClick、右键自动弹出 Menu，双端交互完全一致。
+	// macOS 与 Windows 均保持常驻 Menu 为 nil，左键弹/收主窗口，右键（macOS 亦支持 Control+点击）
+	// 按需弹出快捷菜单；Linux 等需要常驻托盘菜单的平台直接绑定 tc.menu。
 	var attachedMenu *mygo.Menu
-	if runtime.GOOS != "darwin" {
+	if !usesOnDemandContextMenu(runtime.GOOS) {
 		attachedMenu = tc.menu
 	}
 
@@ -75,7 +95,7 @@ func newTrayController(app *App) (*trayController, error) {
 		Icon:            icon,
 		IconIsTemplate:  true,
 		MonospacedTitle: true,
-		ToolTip:         trayTooltip(snap),
+		ToolTip:         tc.lastToolTip,
 		Menu:            attachedMenu,
 	})
 	if err != nil {
@@ -85,7 +105,7 @@ func newTrayController(app *App) (*trayController, error) {
 	tc.tray.OnClick(func() {
 		tc.app.toggleWindowFromTray()
 	})
-	if runtime.GOOS == "darwin" {
+	if usesOnDemandContextMenu(runtime.GOOS) {
 		tc.tray.OnRightClick(func() {
 			tc.popUpContextMenu()
 		})
@@ -94,15 +114,28 @@ func newTrayController(app *App) (*trayController, error) {
 	return tc, nil
 }
 
-// popUpContextMenu 在 macOS 右键（或 Control+点击）菜单栏图标时弹出快捷菜单，
-// 关闭菜单后立即卸载 Menu，确保下次左键点击依然弹出主窗口。
+// popUpContextMenu 在右键（macOS 亦支持 Control+点击）托盘图标时按需弹出快捷菜单，
+// 关闭菜单后立即卸载 Menu，确保左键点击始终弹出主窗口，并避免 Windows 弹出期间收到菜单项更新而闪烁。
 func (tc *trayController) popUpContextMenu() {
-	if tc == nil || tc.tray == nil || tc.menu == nil {
+	if tc == nil || tc.tray == nil || tc.menuOpen {
 		return
 	}
-	tc.tray.SetMenu(tc.menu)
+	tc.menuOpen = true
+	defer func() {
+		tc.menuOpen = false
+	}()
+
+	menu := tc.menu
+	if buildsFreshMenuOnRightClick(runtime.GOOS) && tc.app != nil && tc.app.eng != nil {
+		menu = tc.buildMenu(tc.app.eng.Snapshot())
+	}
+	if menu == nil {
+		return
+	}
+	tc.tray.SetMenu(menu)
 	tc.tray.PopUpMenu()
 	tc.tray.SetMenu(nil)
+	runtime.KeepAlive(menu)
 }
 
 func (tc *trayController) Destroy() {
@@ -131,15 +164,23 @@ func (tc *trayController) Update(snap engine.Snapshot) {
 		tc.syncDarwinVisual(snap)
 	}
 
-	tc.tray.SetToolTip(trayTooltip(snap))
+	if tip := trayTooltip(snap); tip != tc.lastToolTip {
+		tc.lastToolTip = tip
+		tc.tray.SetToolTip(tip)
+	}
 
-	// 若节点列表或更新提示发生变化，重建菜单；否则增量更新避免打断用户浏览菜单
+	// Windows 托盘菜单在右键弹出时即时按最新快照构建，后台定时快照不触碰菜单项，
+	// 既省去每秒无谓的 postMain 派发，又杜绝 Windows 11 亚克力菜单在打开期间闪烁。
+	if buildsFreshMenuOnRightClick(runtime.GOOS) {
+		return
+	}
+
+	// 若节点列表或更新提示发生变化，重建菜单；否则按需增量更新避免打断用户浏览菜单
 	sig := tc.menuSignature(snap)
 	if sig != tc.lastNodeSig {
 		tc.lastNodeSig = sig
 		tc.menu = tc.buildMenu(snap)
-		// macOS 保持常驻 Menu 为 nil（右键按需弹出），仅在非 macOS 平台同步绑定菜单
-		if runtime.GOOS != "darwin" {
+		if !usesOnDemandContextMenu(runtime.GOOS) {
 			tc.tray.SetMenu(tc.menu)
 		}
 		return
@@ -207,82 +248,148 @@ func (tc *trayController) patchMenuInPlace(snap engine.Snapshot) {
 	tc.patchMenuInPlaceForOS(snap, runtime.GOOS)
 }
 
-func (tc *trayController) patchMenuInPlaceForOS(snap engine.Snapshot, goos string) {
+// patchMenuInPlaceForOS 按需对比并仅写回发生变化的菜单项属性，避免无变化的定时快照
+// 反复调用 mygo MenuItem.Set* 触发不必要的底层原生菜单重绘；返回值表示本次实际写入次数。
+func (tc *trayController) patchMenuInPlaceForOS(snap engine.Snapshot, goos string) int {
 	if tc.menu == nil {
-		return
+		return 0
 	}
+	changes := 0
 	if item := tc.menu.ItemByID("status-header"); item != nil {
-		item.SetLabel(statusHeaderLabel(snap))
+		changes += setMenuItemLabel(item, statusHeaderLabel(snap))
 		if goos == "darwin" {
-			item.SetSubtitle(statusHeaderSubtitle(snap))
+			changes += setMenuItemSubtitle(item, statusHeaderSubtitle(snap))
 		} else {
-			item.SetSubtitle("")
+			changes += setMenuItemSubtitle(item, "")
 		}
 	}
 	if item := tc.menu.ItemByID("status-detail"); item != nil {
-		item.SetLabel(statusHeaderSubtitle(snap))
+		changes += setMenuItemLabel(item, statusHeaderSubtitle(snap))
 	}
 	if item := tc.menu.ItemByID("toggle-window"); item != nil {
 		if tc.app != nil && tc.app.isWindowVisible() {
-			item.SetLabel("隐藏主窗口")
+			changes += setMenuItemLabel(item, "隐藏主窗口")
 		} else {
-			item.SetLabel("打开主窗口")
+			changes += setMenuItemLabel(item, "打开主窗口")
 		}
 	}
-	if item := tc.menu.ItemByID("mode-rule"); item != nil {
-		item.SetChecked(snap.ModeCode == core.ProxyModeRule)
+	// Radio 组先选中目标项（mygo 会自动取消同组其他项的勾选），避免单次切换触发多轮原生重绘。
+	modeItems := [...]struct {
+		id   string
+		mode core.ProxyMode
+	}{
+		{"mode-rule", core.ProxyModeRule},
+		{"mode-global", core.ProxyModeGlobal},
+		{"mode-direct", core.ProxyModeDirect},
 	}
-	if item := tc.menu.ItemByID("mode-global"); item != nil {
-		item.SetChecked(snap.ModeCode == core.ProxyModeGlobal)
+	for _, m := range modeItems {
+		if snap.ModeCode == m.mode {
+			if item := tc.menu.ItemByID(m.id); item != nil {
+				changes += setMenuItemChecked(item, true)
+			}
+		}
 	}
-	if item := tc.menu.ItemByID("mode-direct"); item != nil {
-		item.SetChecked(snap.ModeCode == core.ProxyModeDirect)
+	for _, m := range modeItems {
+		if snap.ModeCode != m.mode {
+			if item := tc.menu.ItemByID(m.id); item != nil {
+				changes += setMenuItemChecked(item, false)
+			}
+		}
 	}
 	if item := tc.menu.ItemByID("toggle-sysproxy"); item != nil {
-		item.SetChecked(snap.SystemProxy)
+		changes += setMenuItemChecked(item, snap.SystemProxy)
 	}
 	if item := tc.menu.ItemByID("toggle-udp"); item != nil {
-		item.SetChecked(snap.UDPAccelerationEnabled)
+		changes += setMenuItemChecked(item, snap.UDPAccelerationEnabled)
 	}
 	if item := tc.menu.ItemByID("toggle-native-udp"); item != nil {
-		item.SetChecked(snap.NativeUDP)
+		changes += setMenuItemChecked(item, snap.NativeUDP)
 	}
 	if item := tc.menu.ItemByID("action-ping"); item != nil {
 		if snap.Pinging {
-			item.SetLabel(fmt.Sprintf("测速中 (%d/%d)…", snap.PingCompleted, snap.PingTotal))
-			item.SetEnabled(false)
+			changes += setMenuItemLabel(item, fmt.Sprintf("测速中 (%d/%d)…", snap.PingCompleted, snap.PingTotal))
+			changes += setMenuItemEnabled(item, false)
 		} else {
-			item.SetLabel("节点测速")
-			item.SetEnabled(true)
+			changes += setMenuItemLabel(item, "节点测速")
+			changes += setMenuItemEnabled(item, true)
 		}
 	}
 	if item := tc.menu.ItemByID("action-sync"); item != nil {
 		if snap.Syncing {
-			item.SetLabel("正在同步订阅…")
-			item.SetEnabled(false)
+			changes += setMenuItemLabel(item, "正在同步订阅…")
+			changes += setMenuItemEnabled(item, false)
 		} else {
-			item.SetLabel("同步订阅与规则")
-			item.SetEnabled(snap.HasCloudAuth)
+			changes += setMenuItemLabel(item, "同步订阅与规则")
+			changes += setMenuItemEnabled(item, snap.HasCloudAuth)
 		}
 	}
 	if item := tc.menu.ItemByID("nodes-submenu"); item != nil {
-		item.SetLabel(nodeSubmenuLabel(snap))
+		changes += setMenuItemLabel(item, nodeSubmenuLabel(snap))
 	}
 
 	for _, n := range snap.Nodes {
 		id := fmt.Sprintf("node-%d", n.ID)
 		if item := tc.menu.ItemByID(id); item != nil {
-			item.SetChecked(n.Selected)
-			item.SetBadge(FormatDelay(n.DelayMs, n.Testing))
+			changes += setMenuItemChecked(item, n.Selected)
+			changes += setMenuItemBadge(item, FormatDelay(n.DelayMs, n.Testing))
+			badgeColor := "#94a3b8"
 			if n.DelayMs > 0 {
-				item.SetBadgeTextColor(DelayBadgeColor(n.DelayMs))
+				badgeColor = DelayBadgeColor(n.DelayMs)
 			} else if n.DelayMs < 0 {
-				item.SetBadgeTextColor("#ef4444")
-			} else {
-				item.SetBadgeTextColor("#94a3b8")
+				badgeColor = "#ef4444"
 			}
+			changes += setMenuItemBadgeTextColor(item, badgeColor)
 		}
 	}
+	return changes
+}
+
+func setMenuItemLabel(item *mygo.MenuItem, label string) int {
+	if item.Label == label {
+		return 0
+	}
+	item.SetLabel(label)
+	return 1
+}
+
+func setMenuItemSubtitle(item *mygo.MenuItem, subtitle string) int {
+	if item.Subtitle == subtitle {
+		return 0
+	}
+	item.SetSubtitle(subtitle)
+	return 1
+}
+
+func setMenuItemChecked(item *mygo.MenuItem, checked bool) int {
+	if item.IsChecked() == checked {
+		return 0
+	}
+	item.SetChecked(checked)
+	return 1
+}
+
+func setMenuItemEnabled(item *mygo.MenuItem, enabled bool) int {
+	if item.IsEnabled() == enabled {
+		return 0
+	}
+	item.SetEnabled(enabled)
+	return 1
+}
+
+func setMenuItemBadge(item *mygo.MenuItem, badge string) int {
+	if item.Badge == badge {
+		return 0
+	}
+	item.SetBadge(badge)
+	return 1
+}
+
+func setMenuItemBadgeTextColor(item *mygo.MenuItem, color string) int {
+	if item.BadgeTextColor == color {
+		return 0
+	}
+	item.SetBadgeTextColor(color)
+	return 1
 }
 
 func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
@@ -364,6 +471,10 @@ func (tc *trayController) buildMenuForOS(snap engine.Snapshot, goos string) *myg
 	pingLabel := "节点测速"
 	if snap.Pinging {
 		pingLabel = fmt.Sprintf("测速中 (%d/%d)…", snap.PingCompleted, snap.PingTotal)
+	}
+	syncLabel := "同步订阅与规则"
+	if snap.Syncing {
+		syncLabel = "正在同步订阅…"
 	}
 
 	// macOS 14+ 原生支持两行副标题；Windows 等平台会将 Label 与 Subtitle 拼成一行，
@@ -481,7 +592,7 @@ func (tc *trayController) buildMenuForOS(snap engine.Snapshot, goos string) *myg
 		},
 		&mygo.MenuItem{
 			ID:       "action-sync",
-			Label:    "同步订阅与规则",
+			Label:    syncLabel,
 			Disabled: snap.Syncing || !snap.HasCloudAuth,
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				go func() { _, _ = tc.app.eng.SyncSubscription(context.Background()) }()
