@@ -180,36 +180,65 @@ func TestMainViewRendersCleanly(t *testing.T) {
 	}
 }
 
-// TestDarwinTrayIconIsPureMonochromeTemplate 确保 macOS 菜单栏图标始终为严格纯黑透明模板图
-// （零彩色像素），由系统按浅/深菜单栏自动切换黑白色，避免退化为彩色原生应用图标。
+// TestDarwinTrayIconIsPureMonochromeTemplate 确保 macOS 与 Windows 托盘图标均为严格纯黑透明模板图
+// （零彩色像素，双端均由系统/mygo 随浅/深状态栏自动切黑白），同时验证“已连接=宽尾实心 / 未连接=宽尾空心”。
 func TestDarwinTrayIconIsPureMonochromeTemplate(t *testing.T) {
-	for _, connected := range []bool{true, false} {
-		raw := makeTrayIconPNGForOS(connected, "darwin")
-		img, err := png.Decode(bytes.NewReader(raw))
-		if err != nil {
-			t.Fatalf("decode darwin tray icon (connected=%v): %v", connected, err)
-		}
-		b := img.Bounds()
-		if b.Dx() < 32 || b.Dy() < 32 {
-			t.Fatalf("darwin tray icon too small: %dx%d", b.Dx(), b.Dy())
-		}
-		visiblePixels := 0
-		for y := b.Min.Y; y < b.Max.Y; y++ {
-			for x := b.Min.X; x < b.Max.X; x++ {
-				r, g, bl, a := img.At(x, y).RGBA()
-				if a > 0 {
-					visiblePixels++
-					if r != 0 || g != 0 || bl != 0 {
-						t.Fatalf("darwin tray icon (connected=%v) at (%d,%d) must be monochrome template (RGB=0), got RGBA=(%d,%d,%d,%d)",
-							connected, x, y, r, g, bl, a)
+	for _, goos := range []string{"darwin", "windows"} {
+		var connVisible, idleVisible int
+		for _, connected := range []bool{true, false} {
+			raw := makeTrayIconPNGForOS(connected, goos)
+			img, err := png.Decode(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatalf("decode %s tray icon (connected=%v): %v", goos, connected, err)
+			}
+			b := img.Bounds()
+			if b.Dx() < 32 || b.Dy() < 32 {
+				t.Fatalf("%s tray icon too small: %dx%d", goos, b.Dx(), b.Dy())
+			}
+			visiblePixels := 0
+			var maxAlpha uint32
+			for y := b.Min.Y; y < b.Max.Y; y++ {
+				for x := b.Min.X; x < b.Max.X; x++ {
+					r, g, bl, a := img.At(x, y).RGBA()
+					if a > 0 {
+						visiblePixels++
+						if a > maxAlpha {
+							maxAlpha = a
+						}
+						if r != 0 || g != 0 || bl != 0 {
+							t.Fatalf("%s tray icon (connected=%v) at (%d,%d) must be monochrome template (RGB=0), got RGBA=(%d,%d,%d,%d)",
+								goos, connected, x, y, r, g, bl, a)
+						}
 					}
 				}
 			}
+			if visiblePixels == 0 {
+				t.Fatalf("%s tray icon (connected=%v) has no visible pixels", goos, connected)
+			}
+			// 无论已连接还是未连接，核心线条/填充都必须保持高不透明度，避免在深浅菜单栏/任务栏发淡
+			if maxAlpha < 230*257 {
+				t.Fatalf("%s tray icon (connected=%v) too faint: maxAlpha=%d", goos, connected, maxAlpha>>8)
+			}
+
+			// 尾翼内部点 (17,24)：已连接为实心填充、未连接为空心透明
+			_, _, _, tailInnerA := img.At(17, 24).RGBA()
+			if connected {
+				connVisible = visiblePixels
+				if tailInnerA < 240*257 {
+					t.Fatalf("%s connected tray icon tail interior at (17,24) should be solid, alpha=%d", goos, tailInnerA>>8)
+				}
+			} else {
+				idleVisible = visiblePixels
+				if tailInnerA != 0 {
+					t.Fatalf("%s disconnected tray icon tail interior at (17,24) should be hollow, alpha=%d", goos, tailInnerA>>8)
+				}
+			}
 		}
-		if visiblePixels == 0 {
-			t.Fatalf("darwin tray icon (connected=%v) has no visible pixels", connected)
+		if connVisible <= idleVisible {
+			t.Fatalf("%s connected solid icon should have more visible pixels than disconnected outline: conn=%d idle=%d", goos, connVisible, idleVisible)
 		}
 	}
+
 	// 验证 macOS 双行网速菜单栏模板图：严格纯黑透明像素（RGB=0），且两次不同速率渲染出的像素有变化
 	rawSpeed1 := makeDarwinTraySpeedIconPNG(true, 23*1024, 3686)
 	rawSpeed2 := makeDarwinTraySpeedIconPNG(true, 1024*1024*5, 1024*1024*18)

@@ -63,10 +63,9 @@ func makeTrayIconPNG(connected bool) []byte {
 	return makeTrayIconPNGForOS(connected, runtime.GOOS)
 }
 
-// makeTrayIconPNGForOS 按目标平台生成托盘图标：
-//   - macOS（darwin）：36x36（18pt @2x Retina）严格纯黑透明模板图（R=0,G=0,B=0，零彩色像素），
-//     配合 IconIsTemplate=true 由系统自动按浅/深菜单栏渲染为纯黑或纯白色；
-//   - Windows 等平台：使用高对比度冰青蓝双翼 + 翡翠绿连接状态点，深浅任务栏均清晰醒目。
+// makeTrayIconPNGForOS 生成跨平台统一的极简单色模板托盘图标（宽尾实心双翼 = 已连接，同轮廓空心描边 = 未连接）：
+//   - 36x36（18pt @2x Retina）严格纯黑透明模板图（R=0,G=0,B=0，零彩色像素）；
+//   - 配合 IconIsTemplate=true，macOS 菜单栏与 Windows 任务栏均自动随浅/深背景渲染为纯黑或纯白色。
 func makeTrayIconPNGForOS(connected bool, goos string) []byte {
 	img := renderTrayIconImage(connected, goos)
 	var buf bytes.Buffer
@@ -76,60 +75,49 @@ func makeTrayIconPNGForOS(connected bool, goos string) []byte {
 
 func renderTrayIconImage(connected bool, goos string) *image.NRGBA {
 	const size = 36
+	const ss = 4
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 
-	// 默认采用纯黑单色模板像素（macOS 严禁使用原生彩色图标）
+	if !connected {
+		renderTrayDisconnectedIcon(img, size, ss, goos)
+		return img
+	}
+
+	// 已连接：双端统一的极简单色饱满宽尾实心双翼（RGB=0 模板像素，由系统/mygo 自动按深浅栏着白或着黑）
 	primary := color.NRGBA{R: 0, G: 0, B: 0, A: 255}
-	secondary := color.NRGBA{R: 0, G: 0, B: 0, A: 165}
-	accent := color.NRGBA{R: 16, G: 185, B: 129, A: 255} // 仅非 macOS 平台使用的翡翠绿状态点
+	secondary := color.NRGBA{R: 0, G: 0, B: 0, A: 235}
 
-	if goos == "darwin" {
-		if !connected {
-			primary.A = 140
-			secondary.A = 88
-		}
-	} else {
-		if connected {
-			primary = color.NRGBA{R: 56, G: 189, B: 248, A: 255}   // 冰青电光蓝
-			secondary = color.NRGBA{R: 99, G: 102, B: 241, A: 235} // 靛蓝影翼
-		} else {
-			primary = color.NRGBA{R: 148, G: 163, B: 184, A: 255}
-			secondary = color.NRGBA{R: 100, G: 116, B: 139, A: 200}
-		}
-	}
-
-	// 前层主飞翼（按 36x36 Retina 菜单栏安全区精修，与 App Logo 双翼轮廓一致）
+	// 前层主飞翼（加宽下尾翼并扩大安全区占比，18pt/16px 下轮廓挺拔饱满）
 	frontWing := [][2]float64{
-		{32.0, 4.5},  // 主机头
-		{4.0, 15.2},  // 左翼尖
-		{14.1, 18.6}, // 中折点
-		{13.0, 30.4}, // 下尾尖
-		{20.8, 20.8}, // 右内折
-		{32.0, 4.5},
+		{33.0, 3.5},  // 主机头
+		{2.8, 14.5},  // 左翼尖
+		{13.4, 19.6}, // 中折点
+		{14.8, 32.8}, // 下尾尖
+		{23.8, 22.8}, // 右宽尾内折
+		{33.0, 3.5},
 	}
-	// 后层影翼（右下错位叠层，保留清晰缝隙勾勒立体双翼层次）
+	// 后层影翼（顺着加宽尾翼在右下错位叠层，保留清晰窄缝勾勒立体层次）
 	shadowWing := [][2]float64{
-		{32.0, 12.9}, // 影翼尖
-		{19.7, 19.7}, // 中连接
-		{18.0, 31.5}, // 影尾尖
-		{32.0, 12.9},
+		{33.0, 11.2}, // 影翼尖
+		{22.6, 21.4}, // 中连接
+		{20.8, 33.0}, // 影尾尖
+		{33.0, 11.2},
 	}
 
-	const ss = 4
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
 			frontHits := 0
 			shadowHits := 0
 			for sy := 0; sy < ss; sy++ {
 				for sx := 0; sx < ss; sx++ {
-					px := float64(x) + (float64(sx)+0.5)/ss
-					py := float64(y) + (float64(sy)+0.5)/ss
+					px := float64(x) + (float64(sx)+0.5)/float64(ss)
+					py := float64(y) + (float64(sy)+0.5)/float64(ss)
 					inFront := pointInPoly(px, py, frontWing) &&
-						!pointNearSegment(px, py, 13.7, 18.3, 28.2, 8.1, 1.05)
+						!pointNearSegment(px, py, 13.4, 19.6, 27.6, 8.4, 0.85)
 					if inFront {
 						frontHits++
 					} else if pointInPoly(px, py, shadowWing) &&
-						!pointNearSegment(px, py, 20.8, 20.8, 13.0, 30.4, 1.50) {
+						!pointNearSegment(px, py, 23.8, 22.8, 14.8, 32.8, 1.15) {
 						shadowHits++
 					}
 				}
@@ -138,41 +126,74 @@ func renderTrayIconImage(connected bool, goos string) *image.NRGBA {
 			if total == 0 {
 				continue
 			}
+			chosen := secondary
 			if frontHits >= shadowHits {
-				a := uint8(math.Round(float64(primary.A) * float64(total) / float64(ss*ss)))
-				img.SetNRGBA(x, y, color.NRGBA{R: primary.R, G: primary.G, B: primary.B, A: a})
-			} else {
-				a := uint8(math.Round(float64(secondary.A) * float64(total) / float64(ss*ss)))
-				img.SetNRGBA(x, y, color.NRGBA{R: secondary.R, G: secondary.G, B: secondary.B, A: a})
+				chosen = primary
 			}
-		}
-	}
-
-	// Windows 非模板图标在右下角加连接状态绿点
-	if goos != "darwin" && connected {
-		cx, cy, rad := 29.2, 29.2, 4.2
-		for y := 22; y < size; y++ {
-			for x := 22; x < size; x++ {
-				d := math.Hypot(float64(x)+0.5-cx, float64(y)+0.5-cy)
-				if d <= rad+0.9 {
-					alpha := 1.0
-					if d > rad-0.5 {
-						alpha = max(0, (rad+0.9-d)/1.4)
-					}
-					if alpha > 0 {
-						img.SetNRGBA(x, y, color.NRGBA{
-							R: accent.R,
-							G: accent.G,
-							B: accent.B,
-							A: uint8(math.Round(255 * alpha)),
-						})
-					}
-				}
-			}
+			a := uint8(math.Round(float64(chosen.A) * float64(total) / float64(ss*ss)))
+			img.SetNRGBA(x, y, color.NRGBA{R: chosen.R, G: chosen.G, B: chosen.B, A: a})
 		}
 	}
 
 	return img
+}
+
+// renderTrayDisconnectedIcon 绘制未连接状态的纯线条宽尾空心飞翼（极简单色模板图，内部镂空充裕，与实心已连接一眼区分）。
+func renderTrayDisconnectedIcon(img *image.NRGBA, size, ss int, goos string) {
+	outerColor := color.NRGBA{R: 0, G: 0, B: 0, A: 245}
+	innerColor := color.NRGBA{R: 0, G: 0, B: 0, A: 190}
+	outerHalfW := 1.35
+	innerHalfW := 0.92
+	if goos != "darwin" {
+		// Windows 16px 小尺寸缩放下略微加粗描边，保持极简线条利落不断裂
+		outerHalfW = 1.45
+		innerHalfW = 1.00
+	}
+
+	outline := [][2]float64{
+		{32.4, 4.0},  // 机头
+		{3.6, 14.6},  // 左翼尖
+		{13.6, 19.6}, // 中折点
+		{15.0, 32.0}, // 下尾尖
+		{23.8, 22.6}, // 右宽尾内折
+	}
+
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			outerHits := 0
+			innerHits := 0
+			for sy := 0; sy < ss; sy++ {
+				for sx := 0; sx < ss; sx++ {
+					px := float64(x) + (float64(sx)+0.5)/float64(ss)
+					py := float64(y) + (float64(sy)+0.5)/float64(ss)
+					onOuter := false
+					for i := 0; i < len(outline); i++ {
+						p1 := outline[i]
+						p2 := outline[(i+1)%len(outline)]
+						if pointNearSegment(px, py, p1[0], p1[1], p2[0], p2[1], outerHalfW) {
+							onOuter = true
+							break
+						}
+					}
+					if onOuter {
+						outerHits++
+					} else if pointNearSegment(px, py, 13.6, 19.6, 31.4, 4.8, innerHalfW) {
+						innerHits++
+					}
+				}
+			}
+			total := outerHits + innerHits
+			if total == 0 {
+				continue
+			}
+			chosen := innerColor
+			if outerHits >= innerHits {
+				chosen = outerColor
+			}
+			a := uint8(math.Round(float64(chosen.A) * float64(total) / float64(ss*ss)))
+			img.SetNRGBA(x, y, color.NRGBA{R: chosen.R, G: chosen.G, B: chosen.B, A: a})
+		}
+	}
 }
 
 var (

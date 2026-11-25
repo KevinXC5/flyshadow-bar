@@ -19,6 +19,11 @@ const (
 	traySpeedRefreshInterval = 3 * time.Second
 	// traySpeedRefreshTolerance 为 1 秒定时器抖动留出 100ms 容差，确保第 3 秒采样稳定命中而非滑落到第 4 秒。
 	traySpeedRefreshTolerance = 100 * time.Millisecond
+
+	// 托盘菜单视觉列宽上限（ASCII 计 1 列、宽字符计 2 列），避免 Windows 单行菜单被长节点名或错误文本撑宽。
+	trayMenuNodeNameMaxCols = 22
+	trayMenuSubNodeMaxCols  = 30
+	trayMenuErrorMaxCols    = 26
 )
 
 // trayController 负责菜单栏 / 系统托盘的构建、状态刷新与快捷控制。
@@ -68,7 +73,7 @@ func newTrayController(app *App) (*trayController, error) {
 	tray, err := mygo.NewTray(mygo.TrayOptions{
 		ID:              "flyshadow-bar-main",
 		Icon:            icon,
-		IconIsTemplate:  runtime.GOOS == "darwin",
+		IconIsTemplate:  true,
 		MonospacedTitle: true,
 		ToolTip:         trayTooltip(snap),
 		Menu:            attachedMenu,
@@ -117,9 +122,9 @@ func (tc *trayController) Update(snap engine.Snapshot) {
 		if !tc.hasInitialized || connected != tc.lastConnected {
 			tc.lastConnected = connected
 			if connected {
-				tc.tray.SetIcon(tc.iconConnected, false)
+				tc.tray.SetIcon(tc.iconConnected, true)
 			} else {
-				tc.tray.SetIcon(tc.iconIdle, false)
+				tc.tray.SetIcon(tc.iconIdle, true)
 			}
 		}
 	} else {
@@ -199,15 +204,26 @@ func (tc *trayController) shouldRedrawTraySpeed(connected bool, speedKey string,
 }
 
 func (tc *trayController) patchMenuInPlace(snap engine.Snapshot) {
+	tc.patchMenuInPlaceForOS(snap, runtime.GOOS)
+}
+
+func (tc *trayController) patchMenuInPlaceForOS(snap engine.Snapshot, goos string) {
 	if tc.menu == nil {
 		return
 	}
 	if item := tc.menu.ItemByID("status-header"); item != nil {
 		item.SetLabel(statusHeaderLabel(snap))
-		item.SetSubtitle(statusHeaderSubtitle(snap))
+		if goos == "darwin" {
+			item.SetSubtitle(statusHeaderSubtitle(snap))
+		} else {
+			item.SetSubtitle("")
+		}
+	}
+	if item := tc.menu.ItemByID("status-detail"); item != nil {
+		item.SetLabel(statusHeaderSubtitle(snap))
 	}
 	if item := tc.menu.ItemByID("toggle-window"); item != nil {
-		if tc.app.isWindowVisible() {
+		if tc.app != nil && tc.app.isWindowVisible() {
 			item.SetLabel("隐藏主窗口")
 		} else {
 			item.SetLabel("打开主窗口")
@@ -250,11 +266,7 @@ func (tc *trayController) patchMenuInPlace(snap engine.Snapshot) {
 		}
 	}
 	if item := tc.menu.ItemByID("nodes-submenu"); item != nil {
-		label := "选择节点"
-		if snap.CurrentNode != nil {
-			label = "节点: " + snap.CurrentNode.DisplayName
-		}
-		item.SetLabel(label)
+		item.SetLabel(nodeSubmenuLabel(snap))
 	}
 
 	for _, n := range snap.Nodes {
@@ -274,14 +286,13 @@ func (tc *trayController) patchMenuInPlace(snap engine.Snapshot) {
 }
 
 func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
-	winLabel := "打开主窗口"
-	if tc.app.isWindowVisible() {
-		winLabel = "隐藏主窗口"
-	}
+	return tc.buildMenuForOS(snap, runtime.GOOS)
+}
 
-	nodeSubmenuLabel := "选择节点"
-	if snap.CurrentNode != nil {
-		nodeSubmenuLabel = "节点: " + snap.CurrentNode.DisplayName
+func (tc *trayController) buildMenuForOS(snap engine.Snapshot, goos string) *mygo.Menu {
+	winLabel := "打开主窗口"
+	if tc.app != nil && tc.app.isWindowVisible() {
+		winLabel = "隐藏主窗口"
 	}
 
 	// 节点菜单按「收藏优先 → 原序」排列，方便托盘快速点选常用节点
@@ -297,18 +308,27 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 	nodeItems := make([]*mygo.MenuItem, 0, len(orderedNodes)+2)
 	for _, n := range orderedNodes {
 		node := n
-		label := node.DisplayName
+		displayName := node.DisplayName
+		if goos != "darwin" {
+			displayName = truncateMenuText(displayName, trayMenuSubNodeMaxCols)
+		}
+		label := displayName
 		if node.Starred {
 			label = "★ " + label
 		}
-		var tags []string
-		if node.EnableQuic {
-			tags = append(tags, "QUIC")
+		// 仅 macOS 菜单原生支持两行副标题；Windows 后端会将 Subtitle 用 " — " 拼接到同一行，
+		// 因此非 macOS 端省略协议副标题，避免节点子菜单被拉宽。
+		subtitle := ""
+		if goos == "darwin" {
+			var tags []string
+			if node.EnableQuic {
+				tags = append(tags, "QUIC")
+			}
+			if node.NativeUDP {
+				tags = append(tags, "UDP")
+			}
+			subtitle = strings.Join(tags, " · ")
 		}
-		if node.NativeUDP {
-			tags = append(tags, "UDP")
-		}
-		subtitle := strings.Join(tags, " · ")
 
 		badgeColor := "#94a3b8"
 		if node.DelayMs > 0 {
@@ -346,14 +366,33 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 		pingLabel = fmt.Sprintf("测速中 (%d/%d)…", snap.PingCompleted, snap.PingTotal)
 	}
 
-	items := []*mygo.MenuItem{
-		{
+	// macOS 14+ 原生支持两行副标题；Windows 等平台会将 Label 与 Subtitle 拼成一行，
+	// 因此在非 macOS 平台拆为两条紧凑禁用项，防止顶部状态把整个托盘菜单横向撑宽。
+	items := make([]*mygo.MenuItem, 0, 20)
+	if goos == "darwin" {
+		items = append(items, &mygo.MenuItem{
 			ID:       "status-header",
 			Label:    statusHeaderLabel(snap),
 			Subtitle: statusHeaderSubtitle(snap),
 			Disabled: true,
-		},
-		{
+		})
+	} else {
+		items = append(items,
+			&mygo.MenuItem{
+				ID:       "status-header",
+				Label:    statusHeaderLabel(snap),
+				Disabled: true,
+			},
+			&mygo.MenuItem{
+				ID:       "status-detail",
+				Label:    statusHeaderSubtitle(snap),
+				Disabled: true,
+			},
+		)
+	}
+
+	items = append(items,
+		&mygo.MenuItem{
 			ID:    "toggle-window",
 			Label: winLabel,
 			Click: func(*mygo.MenuItem, *mygo.Window) {
@@ -361,7 +400,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 			},
 		},
 		mygo.Separator(),
-		{
+		&mygo.MenuItem{
 			ID:       "mode-rule",
 			Label:    "规则模式",
 			Type:     mygo.MenuItemRadio,
@@ -371,7 +410,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 				go func() { _ = tc.app.eng.SetMode(core.ProxyModeRule) }()
 			},
 		},
-		{
+		&mygo.MenuItem{
 			ID:       "mode-global",
 			Label:    "全局模式",
 			Type:     mygo.MenuItemRadio,
@@ -381,7 +420,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 				go func() { _ = tc.app.eng.SetMode(core.ProxyModeGlobal) }()
 			},
 		},
-		{
+		&mygo.MenuItem{
 			ID:       "mode-direct",
 			Label:    "直连模式",
 			Type:     mygo.MenuItemRadio,
@@ -392,13 +431,13 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 			},
 		},
 		mygo.Separator(),
-		{
+		&mygo.MenuItem{
 			ID:      "nodes-submenu",
-			Label:   nodeSubmenuLabel,
+			Label:   nodeSubmenuLabel(snap),
 			Submenu: nodeItems,
 		},
 		mygo.Separator(),
-		{
+		&mygo.MenuItem{
 			ID:       "toggle-sysproxy",
 			Label:    "系统代理",
 			Type:     mygo.MenuItemCheckbox,
@@ -409,7 +448,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 				go func() { _ = tc.app.eng.SetSystemProxy(next) }()
 			},
 		},
-		{
+		&mygo.MenuItem{
 			ID:       "toggle-udp",
 			Label:    "UDP 加速 (QUIC)",
 			Type:     mygo.MenuItemCheckbox,
@@ -420,7 +459,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 				go func() { _ = tc.app.eng.SetUDPAcceleration(next) }()
 			},
 		},
-		{
+		&mygo.MenuItem{
 			ID:       "toggle-native-udp",
 			Label:    "原生 UDP",
 			Type:     mygo.MenuItemCheckbox,
@@ -432,7 +471,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 			},
 		},
 		mygo.Separator(),
-		{
+		&mygo.MenuItem{
 			ID:       "action-ping",
 			Label:    pingLabel,
 			Disabled: snap.Pinging,
@@ -440,7 +479,7 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 				go func() { _, _ = tc.app.eng.PingAll(context.Background()) }()
 			},
 		},
-		{
+		&mygo.MenuItem{
 			ID:       "action-sync",
 			Label:    "同步订阅与规则",
 			Disabled: snap.Syncing || !snap.HasCloudAuth,
@@ -448,14 +487,14 @@ func (tc *trayController) buildMenu(snap engine.Snapshot) *mygo.Menu {
 				go func() { _, _ = tc.app.eng.SyncSubscription(context.Background()) }()
 			},
 		},
-		{
+		&mygo.MenuItem{
 			ID:    "action-reload",
 			Label: "重载配置",
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				go func() { _ = tc.app.eng.Reload() }()
 			},
 		},
-	}
+	)
 
 	if tc.app != nil && tc.app.updates != nil {
 		st := tc.app.updates.Status()
@@ -502,22 +541,75 @@ func statusHeaderLabel(snap engine.Snapshot) string {
 	case engine.StateError:
 		dot = "✕"
 	}
-	nodeName := "未选择节点"
-	if snap.CurrentNode != nil {
-		nodeName = snap.CurrentNode.DisplayName
+	if snap.ProxyPort > 0 && snap.State != engine.StateError {
+		return fmt.Sprintf("%s %s · 127.0.0.1:%d", dot, StateLabel(snap.State), snap.ProxyPort)
 	}
-	return fmt.Sprintf("%s %s · %s", dot, StateLabel(snap.State), nodeName)
+	return fmt.Sprintf("%s %s", dot, StateLabel(snap.State))
 }
 
 func statusHeaderSubtitle(snap engine.Snapshot) string {
 	if snap.State == engine.StateError && snap.LastError != "" {
-		return snap.LastError
+		return truncateMenuText(snap.LastError, trayMenuErrorMaxCols)
 	}
-	return fmt.Sprintf("127.0.0.1:%d · ↑ %s  ↓ %s",
-		snap.ProxyPort,
+	return fmt.Sprintf("↑ %s  ↓ %s",
 		FormatSpeed(snap.UploadSpeedBps),
 		FormatSpeed(snap.DownloadSpeedBps),
 	)
+}
+
+func nodeSubmenuLabel(snap engine.Snapshot) string {
+	if snap.CurrentNode == nil {
+		return "选择节点"
+	}
+	return "节点: " + truncateMenuText(snap.CurrentNode.DisplayName, trayMenuNodeNameMaxCols)
+}
+
+// truncateMenuText 按视觉列宽截断菜单文案（ASCII 按 1 列、宽字符按 2 列），避免单行菜单项过宽。
+func truncateMenuText(s string, maxCols int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
+	if maxCols <= 0 || menuDisplayCols(s) <= maxCols {
+		return s
+	}
+	limit := maxCols - 1 // 为末尾省略号留出 1 列
+	if limit < 1 {
+		return "…"
+	}
+	var b strings.Builder
+	cols := 0
+	for _, r := range s {
+		w := runeMenuCols(r)
+		if cols+w > limit {
+			break
+		}
+		b.WriteRune(r)
+		cols += w
+	}
+	return strings.TrimRight(b.String(), " ") + "…"
+}
+
+func menuDisplayCols(s string) int {
+	cols := 0
+	for _, r := range s {
+		cols += runeMenuCols(r)
+	}
+	return cols
+}
+
+func runeMenuCols(r rune) int {
+	// CJK 统一表意文字、全角标点与假名/韩文等宽字符按 2 列计算，其余按 1 列计算。
+	switch {
+	case r >= 0x1100 && r <= 0x115F,
+		r >= 0x2E80 && r <= 0xA4CF,
+		r >= 0xAC00 && r <= 0xD7A3,
+		r >= 0xF900 && r <= 0xFAFF,
+		r >= 0xFE10 && r <= 0xFE19,
+		r >= 0xFE30 && r <= 0xFE6F,
+		r >= 0xFF00 && r <= 0xFF60,
+		r >= 0xFFE0 && r <= 0xFFE6:
+		return 2
+	default:
+		return 1
+	}
 }
 
 func trayTooltip(snap engine.Snapshot) string {
