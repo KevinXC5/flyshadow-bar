@@ -18,6 +18,7 @@ import (
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
 	"github.com/KevinXC5/flyshadow-bar/internal/engine"
+	"github.com/KevinXC5/flyshadow-bar/internal/sysproxy"
 	"github.com/KevinXC5/flyshadow-bar/internal/version"
 )
 
@@ -107,6 +108,7 @@ func StartServer(eng *engine.Engine, opts ServerOptions) (*Server, error) {
 	mux.HandleFunc("/api/v1/udp", s.auth(s.handleUDP))
 	mux.HandleFunc("/api/v1/native-udp", s.auth(s.handleNativeUDP))
 	mux.HandleFunc("/api/v1/sysproxy", s.auth(s.handleSysProxy))
+	mux.HandleFunc("/api/v1/sysproxy/services", s.auth(s.handleSysProxyServices))
 	mux.HandleFunc("/api/v1/ping", s.auth(s.handlePing))
 	mux.HandleFunc("/api/v1/reload", s.auth(s.handleReload))
 	mux.HandleFunc("/api/v1/sync", s.auth(s.handleSync))
@@ -362,6 +364,60 @@ func (s *Server) handleSysProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.eng.Snapshot())
+}
+
+type sysProxyServicesRequest struct {
+	Action   string   `json:"action,omitempty"`   // exclude | include | set | reset
+	Service  string   `json:"service,omitempty"`  // 单网卡操作时的网络服务名
+	Excluded []string `json:"excluded,omitempty"` // action=set 时覆盖排除列表
+}
+
+func (s *Server) handleSysProxyServices(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		st, err := s.eng.SysProxyServices(true)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+
+	case http.MethodPost:
+		var req sysProxyServicesRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体 JSON 无效"})
+			return
+		}
+		var (
+			st  engine.SysProxyServicesState
+			err error
+		)
+		switch strings.ToLower(strings.TrimSpace(req.Action)) {
+		case "exclude":
+			st, err = s.eng.SetSysProxyServiceEnabled(req.Service, false)
+		case "include":
+			st, err = s.eng.SetSysProxyServiceEnabled(req.Service, true)
+		case "reset":
+			st, err = s.eng.SetSysProxyExcludedServices(nil)
+		case "set":
+			st, err = s.eng.SetSysProxyExcludedServices(req.Excluded)
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的 action（支持 exclude / include / set / reset）"})
+			return
+		}
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, sysproxy.ErrServiceSelectionUnsupported) || strings.Contains(err.Error(), "未找到网络服务") || strings.Contains(err.Error(), "不能为空") {
+				status = http.StatusBadRequest
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "仅支持 GET 或 POST"})
+	}
 }
 
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {

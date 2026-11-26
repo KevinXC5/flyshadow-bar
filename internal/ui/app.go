@@ -33,10 +33,11 @@ type App struct {
 	eng     *engine.Engine
 	ctrl    *control.Server
 	tray    *trayController
-	win     *mygo.Window
-	vm      *viewModel
-	updates *UpdateManager
-	prefs   config.AppPrefs
+	win       *mygo.Window
+	vm        *viewModel
+	updates   *UpdateManager
+	prefs     config.AppPrefs
+	prefsPath string
 
 	updateProgressReset func()
 
@@ -72,7 +73,8 @@ func Run(opts RunOptions) error {
 	log.Printf("[app] 启动 FlyShadow Bar: version=%s os=%s/%s startHidden=%v showOnce=%v noConnect=%v noAutoSysProxy=%v",
 		version.Version, runtime.GOOS, runtime.GOARCH, opts.StartHidden, opts.ShowOnceOnStart, opts.NoConnect, opts.DisableAutoSysProxy)
 
-	prefs := config.LoadAppPrefs("")
+	prefsPath := config.PrefsPathForConfig(opts.ConfigPath)
+	prefs := config.LoadAppPrefs(prefsPath)
 	applyThemeSource(prefs.ThemeMode)
 
 	eng, err := engine.New(engine.Options{
@@ -86,9 +88,10 @@ func Run(opts RunOptions) error {
 	}
 
 	app := &App{
-		eng:    eng,
-		prefs:  prefs,
-		stopCh: make(chan struct{}),
+		eng:       eng,
+		prefs:     prefs,
+		prefsPath: prefsPath,
+		stopCh:    make(chan struct{}),
 	}
 	app.updates = newUpdateManager(func() {
 		mygo.RunOnMain(func() {
@@ -602,7 +605,11 @@ func (a *App) updateWindow(fn func()) {
 func (a *App) setThemeMode(mode string) {
 	a.prefs.ThemeMode = mode
 	applyThemeSource(mode)
-	_ = config.SaveAppPrefs("", a.prefs)
+	if updated, err := config.UpdateAppPrefs(a.prefsPath, func(p *config.AppPrefs) {
+		p.ThemeMode = mode
+	}); err == nil {
+		a.prefs = updated
+	}
 	if a.win != nil {
 		a.win.Invalidate()
 	}
@@ -610,7 +617,11 @@ func (a *App) setThemeMode(mode string) {
 
 func (a *App) setShowTraySpeed(show bool) {
 	a.prefs.ShowTraySpeed = show
-	_ = config.SaveAppPrefs("", a.prefs)
+	if updated, err := config.UpdateAppPrefs(a.prefsPath, func(p *config.AppPrefs) {
+		p.ShowTraySpeed = show
+	}); err == nil {
+		a.prefs = updated
+	}
 	a.refreshTrayMenu()
 }
 

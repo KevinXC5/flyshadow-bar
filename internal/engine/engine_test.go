@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
+	"github.com/KevinXC5/flyshadow-bar/internal/sysproxy"
 )
 
 type mockCore struct {
@@ -673,5 +675,170 @@ func TestEngineSampleStatsSyncsDisconnectAndReconnect(t *testing.T) {
 	eng.sampleStats(now.Add(5 * time.Second))
 	if got := eng.Snapshot().State; got != StateDisconnected {
 		t.Fatalf("state after explicit Disconnect = %q, want %q", got, StateDisconnected)
+	}
+}
+
+type mockFilterSysProxy struct {
+	mu          sync.Mutex
+	enabled     bool
+	host        string
+	port        int
+	services    []string
+	excluded    []string
+	enabledSvcs []string
+	cleanedSvcs []string
+}
+
+func (s *mockFilterSysProxy) Enable(host string, port int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.enabled = true
+	s.host = host
+	s.port = port
+	return nil
+}
+
+func (s *mockFilterSysProxy) Disable() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.enabled = false
+	return nil
+}
+
+func (s *mockFilterSysProxy) IsEnabled(host string, port int) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled && s.host == host && s.port == port, nil
+}
+
+func (s *mockFilterSysProxy) ListServices() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.services...), nil
+}
+
+func (s *mockFilterSysProxy) SetExcludedServices(excluded []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.excluded = append([]string(nil), excluded...)
+}
+
+func (s *mockFilterSysProxy) ExcludedServices() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.excluded...)
+}
+
+func (s *mockFilterSysProxy) EnableService(service, host string, port int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.enabledSvcs = append(s.enabledSvcs, service)
+	return nil
+}
+
+func (s *mockFilterSysProxy) DisableServiceIfMatches(service, host string, port int) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanedSvcs = append(s.cleanedSvcs, service)
+	return true, nil
+}
+
+func TestEngineSysProxyServiceFilteringLifecycle(t *testing.T) {
+	cfgPath := writeTestConfig(t)
+	prefsPath := config.PrefsPathForConfig(cfgPath)
+
+	// 预先写入主题偏好和初始排除网卡，验证加载与保真
+	if _, err := config.UpdateAppPrefs(prefsPath, func(p *config.AppPrefs) {
+		p.ThemeMode = "dark"
+		p.ShowTraySpeed = true
+		p.SysProxyExcludedServices = []string{"Thunderbolt Bridge"}
+	}); err != nil {
+		t.Fatalf("seed prefs: %v", err)
+	}
+
+	mc := &mockCore{}
+	sp := &mockFilterSysProxy{
+		services: []string{"Wi-Fi", "USB 10/100/1000 LAN", "Thunderbolt Bridge"},
+	}
+	eng, err := New(Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          mc,
+		SysProxy:            sp,
+		DisableAutoSysProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	snap := eng.Snapshot()
+	if !snap.SysProxyServiceSelectionSupported {
+		t.Fatalf("expected SysProxyServiceSelectionSupported=true")
+	}
+	if len(snap.SysProxyServices) != 3 || len(snap.SysProxyExcludedServices) != 1 || snap.SysProxyExcludedServices[0] != "Thunderbolt Bridge" {
+		t.Fatalf("initial snapshot services/excluded mismatch: services=%v excluded=%v", snap.SysProxyServices, snap.SysProxyExcludedServices)
+	}
+
+	// 开启系统代理后排除 USB 网卡，应清理该网卡代理并持久化偏好（且不覆盖主题偏好）
+	if err := eng.SetSystemProxy(true); err != nil {
+		t.Fatalf("SetSystemProxy(true): %v", err)
+	}
+	st, err := eng.SetSysProxyServiceEnabled("usb 10/100/1000 lan", false)
+	if err != nil {
+		t.Fatalf("exclude USB service: %v", err)
+	}
+	if len(st.Excluded) != 2 || st.Excluded[1] != "USB 10/100/1000 LAN" {
+		t.Fatalf("unexpected excluded list: %+v", st.Excluded)
+	}
+	sp.mu.Lock()
+	cleaned := append([]string(nil), sp.cleanedSvcs...)
+	sp.mu.Unlock()
+	if len(cleaned) != 1 || cleaned[0] != "USB 10/100/1000 LAN" {
+		t.Fatalf("expected DisableServiceIfMatches on USB service, got %v", cleaned)
+	}
+
+	// 重新勾选 USB 网卡时因系统代理处于开启状态，应立即为其补开系统代理
+	if _, err := eng.SetSysProxyServiceEnabled("USB 10/100/1000 LAN", true); err != nil {
+		t.Fatalf("re-include USB service: %v", err)
+	}
+	sp.mu.Lock()
+	reEnabled := append([]string(nil), sp.enabledSvcs...)
+	sp.mu.Unlock()
+	if len(reEnabled) != 1 || reEnabled[0] != "USB 10/100/1000 LAN" {
+		t.Fatalf("expected EnableService on re-included USB service, got %v", reEnabled)
+	}
+
+	// 校验偏好文件既保存了最新排除列表，又保留了原有主题偏好
+	prefs := config.LoadAppPrefs(prefsPath)
+	if prefs.ThemeMode != "dark" || !prefs.ShowTraySpeed {
+		t.Fatalf("existing app prefs lost: %+v", prefs)
+	}
+	if len(prefs.SysProxyExcludedServices) != 1 || prefs.SysProxyExcludedServices[0] != "Thunderbolt Bridge" {
+		t.Fatalf("persisted excluded services mismatch: %+v", prefs.SysProxyExcludedServices)
+	}
+}
+
+func TestEngineSysProxyServiceFilteringUnsupportedPlatform(t *testing.T) {
+	cfgPath := writeTestConfig(t)
+	eng, err := New(Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          &mockCore{},
+		SysProxy:            &mockSysProxy{},
+		DisableAutoSysProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	if eng.Snapshot().SysProxyServiceSelectionSupported {
+		t.Fatalf("unsupported sysproxy should report SysProxyServiceSelectionSupported=false")
+	}
+	st, err := eng.SysProxyServices(true)
+	if err != nil || st.Supported {
+		t.Fatalf("SysProxyServices on unsupported = (%+v, %v)", st, err)
+	}
+	if _, err := eng.SetSysProxyServiceEnabled("Wi-Fi", false); !errors.Is(err, sysproxy.ErrServiceSelectionUnsupported) {
+		t.Fatalf("expected ErrServiceSelectionUnsupported, got %v", err)
 	}
 }

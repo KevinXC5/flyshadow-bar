@@ -270,3 +270,38 @@ func TestEnsureMigratedSkipsWhenCustomEnvSet(t *testing.T) {
 		t.Fatalf("设置自定义环境变量时应跳过迁移: %+v", rep)
 	}
 }
+
+func TestUpdateAppPrefsPreservesOtherFieldsAndNormalizesServices(t *testing.T) {
+	dir := t.TempDir()
+	prefsPath := PrefsPathForConfig(filepath.Join(dir, "config.json"))
+	if prefsPath != filepath.Join(dir, PrefsFileName) {
+		t.Fatalf("PrefsPathForConfig 路径异常: got=%q", prefsPath)
+	}
+
+	if _, err := UpdateAppPrefs(prefsPath, func(p *AppPrefs) {
+		p.ThemeMode = "dark"
+		p.ShowTraySpeed = true
+	}); err != nil {
+		t.Fatalf("首次 UpdateAppPrefs 失败: %v", err)
+	}
+
+	updated, err := UpdateAppPrefs(prefsPath, func(p *AppPrefs) {
+		p.SysProxyExcludedServices = []string{" USB 10/100/1000 LAN ", "", "USB 10/100/1000 LAN", "Thunderbolt Bridge"}
+	})
+	if err != nil {
+		t.Fatalf("二次 UpdateAppPrefs 失败: %v", err)
+	}
+	if updated.ThemeMode != "dark" || !updated.ShowTraySpeed {
+		t.Fatalf("更新排除网卡时不应丢失已有界面偏好: %+v", updated)
+	}
+	if len(updated.SysProxyExcludedServices) != 2 ||
+		updated.SysProxyExcludedServices[0] != "USB 10/100/1000 LAN" ||
+		updated.SysProxyExcludedServices[1] != "Thunderbolt Bridge" {
+		t.Fatalf("排除网卡列表规范化异常: %+v", updated.SysProxyExcludedServices)
+	}
+
+	reloaded := LoadAppPrefs(prefsPath)
+	if reloaded.ThemeMode != "dark" || !reloaded.ShowTraySpeed || len(reloaded.SysProxyExcludedServices) != 2 {
+		t.Fatalf("重新读取 AppPrefs 不一致: %+v", reloaded)
+	}
+}

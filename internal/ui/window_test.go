@@ -825,6 +825,40 @@ func TestToastLifecycleAcrossWindowHide(t *testing.T) {
 	}
 }
 
+func TestSettingsSysProxyServicesVisibilityAndDisplay(t *testing.T) {
+	// 1. 支持按网卡过滤（macOS）：设置页展示「系统代理作用网卡」与网卡列表及排除标签
+	vmSupported := newViewModel(nil, engine.Snapshot{
+		State:                             engine.StateConnected,
+		ProxyPort:                         7890,
+		SysProxyServiceSelectionSupported: true,
+		SysProxyServices:                  []string{"Wi-Fi", "USB 10/100/1000 LAN", "Thunderbolt Bridge"},
+		SysProxyExcludedServices:          []string{"USB 10/100/1000 LAN"},
+	})
+	vmSupported.activeTab = 3
+	tt := ui.NewTester(vmSupported.render, 500, 920)
+	tt.Frame()
+
+	for _, want := range []string{"系统代理作用网卡", "Wi-Fi", "USB 10/100/1000 LAN", "Thunderbolt Bridge", "已排除"} {
+		if !tt.HasText(want) {
+			t.Fatalf("expected settings view to contain %q, texts=%v", want, tt.Texts())
+		}
+	}
+
+	// 2. 不支持按网卡过滤（Windows 全局代理）：设置页自动隐藏该区块
+	vmUnsupported := newViewModel(nil, engine.Snapshot{
+		State:                             engine.StateConnected,
+		ProxyPort:                         7890,
+		SysProxyServiceSelectionSupported: false,
+	})
+	vmUnsupported.activeTab = 3
+	ttWin := ui.NewTester(vmUnsupported.render, 500, 920)
+	ttWin.Frame()
+
+	if ttWin.HasText("系统代理作用网卡") {
+		t.Fatalf("unsupported platform should hide 系统代理作用网卡 section, texts=%v", ttWin.Texts())
+	}
+}
+
 func assertDialogCentered(t *testing.T, name string, bounds ui.Rect, winW, winH float32) {
 	t.Helper()
 	if bounds.W <= 0 || bounds.H <= 0 {

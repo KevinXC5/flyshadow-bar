@@ -74,4 +74,14 @@ func TestPrintHelpAndCommandHelp(t *testing.T) {
 	if err := printCommandHelp(&unknown, "nonexistent"); err == nil {
 		t.Fatalf("未知子命令 help 应返回错误")
 	}
+
+	var sysproxyHelp bytes.Buffer
+	if err := printCommandHelp(&sysproxyHelp, "sysproxy"); err != nil {
+		t.Fatalf("printCommandHelp(sysproxy) 失败: %v", err)
+	}
+	for _, want := range []string{"services", "exclude", "include", "reset"} {
+		if !strings.Contains(sysproxyHelp.String(), want) {
+			t.Errorf("sysproxy help 缺少关键字 %q", want)
+		}
+	}
 }

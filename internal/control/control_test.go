@@ -174,4 +174,81 @@ func TestControlServerAndClient(t *testing.T) {
 	if err := cli.CloseConnection(ctx, conns[0].CloseKey()); err != nil {
 		t.Fatalf("CloseConnection: %v", err)
 	}
+
+	// 普通 stubSysProxy（模拟 Windows 全局系统代理）应返回 Supported=false 且修改排除列表返回错误
+	svcs, err := cli.SysProxyServices(ctx)
+	if err != nil || svcs.Supported {
+		t.Fatalf("SysProxyServices on unsupported manager = (%+v, %v)", svcs, err)
+	}
+	if _, err := cli.SetSysProxyServices(ctx, "exclude", "USB 10/100/1000 LAN", nil); err == nil {
+		t.Fatalf("SetSysProxyServices on unsupported manager expected error")
+	}
+}
+
+type stubFilterSysProxy struct {
+	stubSysProxy
+	services []string
+	excluded []string
+}
+
+func (s *stubFilterSysProxy) ListServices() ([]string, error) {
+	return append([]string(nil), s.services...), nil
+}
+func (s *stubFilterSysProxy) SetExcludedServices(excluded []string) {
+	s.excluded = append([]string(nil), excluded...)
+}
+func (s *stubFilterSysProxy) ExcludedServices() []string {
+	return append([]string(nil), s.excluded...)
+}
+func (s *stubFilterSysProxy) EnableService(string, string, int) error { return nil }
+func (s *stubFilterSysProxy) DisableServiceIfMatches(string, string, int) (bool, error) {
+	return true, nil
+}
+
+func TestControlSysProxyServicesFilterAPI(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	runPath := filepath.Join(dir, "flyshadow-bar.run.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"proxyPort":18891,"proxyType":3,"subscribeInfo":{"node":[],"customRule":[]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := &stubFilterSysProxy{services: []string{"Wi-Fi", "USB 10/100/1000 LAN"}}
+	eng, err := engine.New(engine.Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          &stubCore{},
+		SysProxy:            sp,
+		DisableAutoSysProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	srv, err := StartServer(eng, ServerOptions{RuntimePath: runPath})
+	if err != nil {
+		t.Fatalf("StartServer: %v", err)
+	}
+	defer srv.Close()
+
+	cli, err := Discover(runPath)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	ctx := context.Background()
+	st, err := cli.SysProxyServices(ctx)
+	if err != nil || !st.Supported || len(st.Services) != 2 {
+		t.Fatalf("SysProxyServices = (%+v, %v)", st, err)
+	}
+
+	st, err = cli.SetSysProxyServices(ctx, "exclude", "USB 10/100/1000 LAN", nil)
+	if err != nil || len(st.Excluded) != 1 || st.Excluded[0] != "USB 10/100/1000 LAN" {
+		t.Fatalf("exclude failed: (%+v, %v)", st, err)
+	}
+
+	st, err = cli.SetSysProxyServices(ctx, "include", "USB 10/100/1000 LAN", nil)
+	if err != nil || len(st.Excluded) != 0 {
+		t.Fatalf("include failed: (%+v, %v)", st, err)
+	}
 }

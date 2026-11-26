@@ -1,17 +1,61 @@
 package sysproxy
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 )
 
+// ErrServiceSelectionUnsupported 表示当前操作系统的系统代理为全局配置，不支持按网卡服务过滤。
+var ErrServiceSelectionUnsupported = errors.New("当前操作系统系统代理为全局配置，不支持按网卡过滤")
+
 // Manager 定义系统代理的统一管理接口。
 type Manager interface {
 	Enable(host string, port int) error
 	Disable() error
 	IsEnabled(host string, port int) (bool, error)
+}
+
+// ServiceFilterManager 定义支持按网络服务过滤系统代理作用范围的扩展接口（如 macOS Network Service）。
+// Windows 等全局系统代理平台不实现此接口，上层据此优雅隐藏或提示不支持按网卡过滤。
+type ServiceFilterManager interface {
+	Manager
+	// ListServices 返回系统当前所有可用（未禁用）的网络服务名称列表。
+	ListServices() ([]string, error)
+	// SetExcludedServices 设置系统代理排除的网络服务名称列表。
+	SetExcludedServices(excluded []string)
+	// ExcludedServices 返回当前已排除的网络服务名称列表副本。
+	ExcludedServices() []string
+	// EnableService 仅对指定网络服务开启系统代理。
+	EnableService(service, host string, port int) error
+	// DisableServiceIfMatches 仅当指定网络服务的代理指向目标 host:port 时关闭对应代理，避免误伤手工配置的其他代理。
+	DisableServiceIfMatches(service, host string, port int) (bool, error)
+}
+
+// normalizeServiceNames 去除空白并去重，保持首次出现顺序。
+func normalizeServiceNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // validateProxyTarget 校验代理主机和端口参数。

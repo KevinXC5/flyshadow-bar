@@ -183,19 +183,7 @@ func runCLI(args []string) error {
 		return nil
 
 	case "sysproxy":
-		action := "toggle"
-		if len(rest) > 0 {
-			action = rest[0]
-		}
-		snap, err := cli.SetSysProxy(ctx, action)
-		if err != nil {
-			return err
-		}
-		if jsonOut {
-			return writeIndentedJSON(snap)
-		}
-		fmt.Printf("系统代理: %s（127.0.0.1:%d）\n", onOff(snap.SystemProxy), snap.ProxyPort)
-		return nil
+		return cmdSysProxy(ctx, cli, rest, jsonOut)
 
 	case "ping":
 		fmt.Fprintln(os.Stderr, "正在并发测速全部节点…")
@@ -383,6 +371,101 @@ func cmdRule(ctx context.Context, cli *control.Client, args []string, jsonOut bo
 	default:
 		return fmt.Errorf("未知 rule 子命令 %q（支持: ls, add, toggle, rm；运行 `fsbar help rule` 查看详细说明）", sub)
 	}
+}
+
+func cmdSysProxy(ctx context.Context, cli *control.Client, args []string, jsonOut bool) error {
+	action := "toggle"
+	if len(args) > 0 {
+		action = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	switch action {
+	case "on", "off", "toggle":
+		snap, err := cli.SetSysProxy(ctx, action)
+		if err != nil {
+			return err
+		}
+		if jsonOut {
+			return writeIndentedJSON(snap)
+		}
+		msg := fmt.Sprintf("系统代理: %s（127.0.0.1:%d）", onOff(snap.SystemProxy), snap.ProxyPort)
+		if len(snap.SysProxyExcludedServices) > 0 {
+			msg += fmt.Sprintf(" · 已排除 %d 个网卡", len(snap.SysProxyExcludedServices))
+		}
+		fmt.Println(msg)
+		return nil
+
+	case "services", "ls", "list":
+		st, err := cli.SysProxyServices(ctx)
+		if err != nil {
+			return err
+		}
+		return printSysProxyServices(st, jsonOut)
+
+	case "exclude", "include":
+		if len(args) < 2 {
+			return fmt.Errorf("缺少网络服务名称（例如: fsbar sysproxy %s \"USB 10/100/1000 LAN\"）", action)
+		}
+		service := strings.TrimSpace(strings.Join(args[1:], " "))
+		st, err := cli.SetSysProxyServices(ctx, action, service, nil)
+		if err != nil {
+			return err
+		}
+		if jsonOut {
+			return writeIndentedJSON(st)
+		}
+		if action == "exclude" {
+			fmt.Printf("已排除系统代理网卡: %s\n", service)
+		} else {
+			fmt.Printf("已恢复系统代理网卡: %s\n", service)
+		}
+		return printSysProxyServices(st, false)
+
+	case "reset", "reset-services":
+		st, err := cli.SetSysProxyServices(ctx, "reset", "", nil)
+		if err != nil {
+			return err
+		}
+		if jsonOut {
+			return writeIndentedJSON(st)
+		}
+		fmt.Println("已重置系统代理作用网卡（全部网络服务默认参与）")
+		return printSysProxyServices(st, false)
+
+	default:
+		return fmt.Errorf("未知 sysproxy 参数 %q（支持: on, off, toggle, services, exclude, include, reset；运行 `fsbar help sysproxy` 查看详细说明）", args[0])
+	}
+}
+
+func printSysProxyServices(st *engine.SysProxyServicesState, jsonOut bool) error {
+	if jsonOut {
+		return writeIndentedJSON(st)
+	}
+	if !st.Supported {
+		fmt.Println("当前操作系统系统代理为全局配置，无需按网卡过滤。")
+		return nil
+	}
+	if len(st.Services) == 0 && len(st.Excluded) == 0 {
+		fmt.Println("未检测到可用的网络服务。")
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "状态\t网络服务")
+	seen := make(map[string]struct{}, len(st.Services))
+	for _, item := range st.Services {
+		seen[item.Name] = struct{}{}
+		status := "启用"
+		if item.Excluded {
+			status = "已排除"
+		}
+		fmt.Fprintf(tw, "%s\t%s\n", status, item.Name)
+	}
+	for _, ex := range st.Excluded {
+		if _, ok := seen[ex]; ok {
+			continue
+		}
+		fmt.Fprintf(tw, "已排除(未检测到)\t%s\n", ex)
+	}
+	return tw.Flush()
 }
 
 func printRules(rules []config.DomainRule, jsonOut bool) error {
@@ -626,7 +709,11 @@ func printStatus(snap *engine.Snapshot, jsonOut bool) error {
 	fmt.Printf("当前节点:   %s\n", nodeName)
 	fmt.Printf("代理模式:   %s (%s)\n", snap.Mode, snap.ModeCode.Label())
 	fmt.Printf("本地代理:   127.0.0.1:%d (局域网共享: %s)\n", snap.ProxyPort, onOff(snap.AllowLAN))
-	fmt.Printf("系统代理:   %s\n", onOff(snap.SystemProxy))
+	sysProxyLine := onOff(snap.SystemProxy)
+	if len(snap.SysProxyExcludedServices) > 0 {
+		sysProxyLine += fmt.Sprintf("（已排除: %s）", strings.Join(snap.SysProxyExcludedServices, ", "))
+	}
+	fmt.Printf("系统代理:   %s\n", sysProxyLine)
 	fmt.Printf("UDP 加速:   %s（当前节点生效: %s）\n", onOff(snap.UDPAccelerationEnabled), onOff(snap.EffectiveTransport.EnableQuic))
 	fmt.Printf("原生 UDP:   %s（当前节点生效: %s）\n", onOff(snap.NativeUDP), onOff(snap.EffectiveTransport.EnableNativeUDP))
 	fmt.Printf("实时速率:   ↑ %s   ↓ %s\n", ui.FormatSpeed(snap.UploadSpeedBps), ui.FormatSpeed(snap.DownloadSpeedBps))
@@ -716,7 +803,8 @@ CLI 全局选项（可放在任意位置，适用于所有子命令）:
   mode [rule|global|direct]                 不带参数查询当前代理模式；带参数切换并保存（支持中英文）
   udp [on|off|toggle]                       开关 UDP 加速（QUIC）并热重连，省略参数默认 toggle
   native-udp [on|off|toggle]                开关原生 UDP 转发并热重连，省略参数默认 toggle
-  sysproxy [on|off|toggle]                  开关操作系统代理，省略参数默认 toggle
+  sysproxy [on|off|toggle|services|exclude|include|reset]
+                                            开关系统代理，或在 macOS 上管理排除的系统代理网卡
   reload                                    重新读取 ~/.flyshadowbar/config.json 并热刷新规则与配置
   sync                                      从云端同步最新订阅节点、流量用量、到期时间与自定义规则
 
@@ -869,20 +957,34 @@ func printCommandHelp(w io.Writer, raw string) error {
 	case "sysproxy":
 		fmt.Fprint(w, `用法:
   fsbar sysproxy [on|off|toggle] [--json]
+  fsbar sysproxy services [--json]
+  fsbar sysproxy exclude <网络服务名> [--json]
+  fsbar sysproxy include <网络服务名> [--json]
+  fsbar sysproxy reset [--json]
 
 说明:
   一键开启或关闭操作系统代理（macOS 通过 networksetup 配置 HTTP/HTTPS/SOCKS，
   Windows 通过注册表与 WinINet 立即刷新）。应用退出时会自动清理系统代理。
+  在 macOS 上支持按网络服务排除不需要走系统代理的网卡（例如公司内网 USB 网卡），
+  取消勾选/排除时会自动关闭该网卡上指向本机端口的代理，且不会误伤手工配置的其他代理；
+  Windows 系统代理为全局配置，无需按网卡过滤。
 
 参数:
-  on      开启系统代理，指向本地混合代理端口
-  off     关闭系统代理
-  toggle  取反切换（省略参数时的默认动作）
+  on                 开启系统代理，指向本地混合代理端口
+  off                关闭系统代理
+  toggle             取反切换（省略参数时的默认动作）
+  services | ls      列出当前可用网络服务与排除状态（仅 macOS）
+  exclude <服务名>   排除指定网络服务并清理其本机代理（仅 macOS）
+  include <服务名>   恢复指定网络服务参与系统代理（仅 macOS）
+  reset              清空排除列表，恢复全部网络服务参与（仅 macOS）
 
 示例:
   fsbar sysproxy on
   fsbar sysproxy off
-  fsbar sysproxy
+  fsbar sysproxy services
+  fsbar sysproxy exclude "USB 10/100/1000 LAN"
+  fsbar sysproxy include "USB 10/100/1000 LAN"
+  fsbar sysproxy reset
 `)
 	case "ping":
 		fmt.Fprint(w, `用法:

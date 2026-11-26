@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -336,10 +337,13 @@ type Config struct {
 
 // AppPrefs 保存 flyshadow-bar 自身的轻量界面偏好，避免污染官方 config.json。
 type AppPrefs struct {
-	ThemeMode     string `json:"themeMode"`     // system | light | dark
-	ShowTraySpeed bool   `json:"showTraySpeed"` // macOS 菜单栏是否显示实时速率
-	UpdateRepo    string `json:"updateRepo,omitempty"`
+	ThemeMode                string   `json:"themeMode"`                          // system | light | dark
+	ShowTraySpeed            bool     `json:"showTraySpeed"`                      // macOS 菜单栏是否显示实时速率
+	UpdateRepo               string   `json:"updateRepo,omitempty"`
+	SysProxyExcludedServices []string `json:"sysProxyExcludedServices,omitempty"` // macOS 系统代理排除的网络服务名列表
 }
+
+var appPrefsMu sync.Mutex
 
 const (
 	// AppDirName 是 FlyShadow Bar 独立的程序主目录名（位于用户主目录下）。
@@ -432,6 +436,44 @@ func DefaultPrefsPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, PrefsFileName), nil
+}
+
+// PrefsPathForConfig 根据配置文件路径推导同目录的偏好文件路径。
+// 当传入自定义 configPath（如 --config 或测试隔离目录）时落在其同目录，避免污染用户默认主目录。
+func PrefsPathForConfig(configPath string) string {
+	trimmed := strings.TrimSpace(configPath)
+	if trimmed != "" {
+		return filepath.Join(filepath.Dir(trimmed), PrefsFileName)
+	}
+	p, err := DefaultPrefsPath()
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
+// NormalizeServiceNames 对网络服务名列表进行去空白、去重并保持首次出现顺序。
+func NormalizeServiceNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // EnsureMigrated 确保独立主目录 ~/.flyshadowbar 已初始化；
@@ -1190,6 +1232,7 @@ func LoadAppPrefs(path string) AppPrefs {
 	default:
 		prefs.ThemeMode = "system"
 	}
+	prefs.SysProxyExcludedServices = NormalizeServiceNames(prefs.SysProxyExcludedServices)
 	return prefs
 }
 
@@ -1202,12 +1245,29 @@ func SaveAppPrefs(path string, prefs AppPrefs) error {
 			return err
 		}
 	}
+	prefs.SysProxyExcludedServices = NormalizeServiceNames(prefs.SysProxyExcludedServices)
 	data, err := json.MarshalIndent(prefs, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
 	return atomicWriteFile(path, data, 0o600)
+}
+
+// UpdateAppPrefs 串行读取、修改并原子保存偏好文件，避免多处更新字段时互相覆盖。
+func UpdateAppPrefs(path string, fn func(*AppPrefs)) (AppPrefs, error) {
+	appPrefsMu.Lock()
+	defer appPrefsMu.Unlock()
+
+	prefs := LoadAppPrefs(path)
+	if fn != nil {
+		fn(&prefs)
+	}
+	prefs.SysProxyExcludedServices = NormalizeServiceNames(prefs.SysProxyExcludedServices)
+	if err := SaveAppPrefs(path, prefs); err != nil {
+		return prefs, err
+	}
+	return prefs, nil
 }
 
 func unmarshalField(raw map[string]json.RawMessage, key string, dst any) {

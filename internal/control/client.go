@@ -99,6 +99,27 @@ func (c *Client) SetSysProxy(ctx context.Context, action string) (*engine.Snapsh
 	return &snap, nil
 }
 
+func (c *Client) SysProxyServices(ctx context.Context) (*engine.SysProxyServicesState, error) {
+	var state engine.SysProxyServicesState
+	if err := c.do(ctx, http.MethodGet, "/api/v1/sysproxy/services", nil, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+func (c *Client) SetSysProxyServices(ctx context.Context, action, service string, excluded []string) (*engine.SysProxyServicesState, error) {
+	var state engine.SysProxyServicesState
+	req := sysProxyServicesRequest{
+		Action:   action,
+		Service:  service,
+		Excluded: excluded,
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/v1/sysproxy/services", req, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
 func (c *Client) Ping(ctx context.Context) ([]engine.NodeSnapshot, error) {
 	var resp struct {
 		Nodes []engine.NodeSnapshot `json:"nodes"`

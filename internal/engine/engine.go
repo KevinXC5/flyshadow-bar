@@ -51,6 +51,19 @@ type SpeedSample struct {
 	DownloadBps int64 `json:"downloadBps"`
 }
 
+// SysProxyServiceItem 表示单个操作系统网络服务的系统代理托管状态（仅 macOS 等支持按网卡过滤的平台使用）。
+type SysProxyServiceItem struct {
+	Name     string `json:"name"`
+	Excluded bool   `json:"excluded"`
+}
+
+// SysProxyServicesState 描述当前平台的系统代理网卡过滤支持情况与各服务状态。
+type SysProxyServicesState struct {
+	Supported bool                  `json:"supported"`
+	Services  []SysProxyServiceItem `json:"services,omitempty"`
+	Excluded  []string              `json:"excluded,omitempty"`
+}
+
 const (
 	maxSpeedHistoryPoints           = 48
 	defaultSysProxyCheckInterval    = 3 * time.Second
@@ -75,9 +88,12 @@ type Snapshot struct {
 	ModeCode               core.ProxyMode          `json:"modeCode"`
 	ProxyPort              int                     `json:"proxyPort"`
 	AllowLAN               bool                    `json:"allowLan"`
-	ProxyAuthEnabled       bool                    `json:"proxyAuthEnabled"`
-	SystemProxy            bool                    `json:"systemProxy"`
-	UDPAccelerationEnabled bool                    `json:"udpAccelerationEnabled"`
+	ProxyAuthEnabled                  bool                    `json:"proxyAuthEnabled"`
+	SystemProxy                       bool                    `json:"systemProxy"`
+	SysProxyServiceSelectionSupported bool                    `json:"sysProxyServiceSelectionSupported"`
+	SysProxyServices                  []string                `json:"sysProxyServices,omitempty"`
+	SysProxyExcludedServices          []string                `json:"sysProxyExcludedServices,omitempty"`
+	UDPAccelerationEnabled            bool                    `json:"udpAccelerationEnabled"`
 	NativeUDP              bool                    `json:"nativeUdp"`
 	EffectiveTransport     core.TransportDecision  `json:"effectiveTransport"`
 	IPv6Enable             bool                    `json:"ipv6Enable"`
@@ -123,7 +139,12 @@ type Engine struct {
 	sysProxy            sysproxy.Manager
 	cloud               cloud.SyncAPI
 	cfg                 *config.Config
+	prefsPath           string
 	disableAutoSysProxy bool
+
+	sysProxyServiceSupported bool
+	sysProxyServices         []string
+	sysProxyExcluded         []string
 
 	geoIPLoaded bool
 	geoIPPath   string
@@ -202,6 +223,7 @@ func New(opts Options) (*Engine, error) {
 		sysProxy:            sp,
 		cloud:               cc,
 		cfg:                 cfg,
+		prefsPath:           config.PrefsPathForConfig(cfg.Path),
 		disableAutoSysProxy: opts.DisableAutoSysProxy,
 		state:               StateDisconnected,
 		delays:              make(map[int]int64),
@@ -230,6 +252,18 @@ func New(opts Options) (*Engine, error) {
 	}
 
 	e.applyConfigToCoreLocked()
+
+	// 若当前平台支持按网络服务过滤系统代理（macOS），加载持久化的排除列表并缓存网卡列表
+	if sf, ok := sp.(sysproxy.ServiceFilterManager); ok {
+		e.sysProxyServiceSupported = true
+		prefs := config.LoadAppPrefs(e.prefsPath)
+		excluded := config.NormalizeServiceNames(prefs.SysProxyExcludedServices)
+		sf.SetExcludedServices(excluded)
+		e.sysProxyExcluded = excluded
+		if services, err := sf.ListServices(); err == nil {
+			e.sysProxyServices = services
+		}
+	}
 
 	// 检测当前系统代理是否已经指向本地端口
 	if enabled, err := sp.IsEnabled("127.0.0.1", cfg.ProxyPort); err == nil {
@@ -453,9 +487,12 @@ func (e *Engine) Snapshot() Snapshot {
 		ModeCode:               mode,
 		ProxyPort:              cfg.ProxyPort,
 		AllowLAN:               cfg.AllowLanConnection,
-		ProxyAuthEnabled:       cfg.ProxyUsername != "" && cfg.ProxyPassword != "",
-		SystemProxy:            e.systemProxyOn,
-		UDPAccelerationEnabled: cfg.UDPAccelerationEnabled,
+		ProxyAuthEnabled:                  cfg.ProxyUsername != "" && cfg.ProxyPassword != "",
+		SystemProxy:                       e.systemProxyOn,
+		SysProxyServiceSelectionSupported: e.sysProxyServiceSupported,
+		SysProxyServices:                  append([]string(nil), e.sysProxyServices...),
+		SysProxyExcludedServices:          append([]string(nil), e.sysProxyExcluded...),
+		UDPAccelerationEnabled:            cfg.UDPAccelerationEnabled,
 		NativeUDP:              cfg.NativeUDP,
 		EffectiveTransport:     eff,
 		IPv6Enable:             cfg.IPv6Enable,
@@ -812,6 +849,231 @@ func (e *Engine) SetAutoSysProxyOnStartUp(enabled bool) error {
 	}
 	e.emit()
 	return nil
+}
+
+// SysProxyServices 返回当前平台的网卡级系统代理支持状态与各网络服务的启用/排除状态。
+// 当 refresh 为 true 时重新枚举系统网络服务列表并更新快照缓存。
+func (e *Engine) SysProxyServices(refresh bool) (SysProxyServicesState, error) {
+	sf, ok := e.sysProxy.(sysproxy.ServiceFilterManager)
+	if !ok {
+		return SysProxyServicesState{Supported: false}, nil
+	}
+
+	e.mu.RLock()
+	needFetch := refresh || len(e.sysProxyServices) == 0
+	e.mu.RUnlock()
+
+	if needFetch {
+		services, err := sf.ListServices()
+		if err != nil {
+			return SysProxyServicesState{Supported: true}, err
+		}
+		changed := false
+		e.mu.Lock()
+		if !stringSliceEqual(e.sysProxyServices, services) {
+			e.sysProxyServices = append([]string(nil), services...)
+			changed = true
+		}
+		e.mu.Unlock()
+		if changed {
+			e.emit()
+		}
+	}
+
+	e.mu.RLock()
+	state := e.buildSysProxyServicesStateLocked()
+	e.mu.RUnlock()
+	return state, nil
+}
+
+// SetSysProxyExcludedServices 整体更新系统代理排除的网络服务列表，持久化到 flyshadow-bar.prefs.json，
+// 并自动关闭新排除网卡上指向本机端口的残留代理、为新恢复的网卡按需开启代理。
+func (e *Engine) SetSysProxyExcludedServices(excluded []string) (SysProxyServicesState, error) {
+	sf, ok := e.sysProxy.(sysproxy.ServiceFilterManager)
+	if !ok {
+		return SysProxyServicesState{Supported: false}, sysproxy.ErrServiceSelectionUnsupported
+	}
+
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+
+	nextExcluded := config.NormalizeServiceNames(excluded)
+
+	// 尝试同步最新服务列表，便于识别哪些网卡已存在
+	if services, err := sf.ListServices(); err == nil {
+		e.mu.Lock()
+		e.sysProxyServices = append([]string(nil), services...)
+		e.mu.Unlock()
+	}
+
+	e.mu.RLock()
+	prevExcluded := append([]string(nil), e.sysProxyExcluded...)
+	port := e.cfg.ProxyPort
+	sysOn := e.systemProxyOn
+	prefsPath := e.prefsPath
+	e.mu.RUnlock()
+
+	prevSet := make(map[string]struct{}, len(prevExcluded))
+	for _, s := range prevExcluded {
+		prevSet[s] = struct{}{}
+	}
+	nextSet := make(map[string]struct{}, len(nextExcluded))
+	for _, s := range nextExcluded {
+		nextSet[s] = struct{}{}
+	}
+
+	var newlyExcluded []string
+	for _, s := range nextExcluded {
+		if _, was := prevSet[s]; !was {
+			newlyExcluded = append(newlyExcluded, s)
+		}
+	}
+	var newlyIncluded []string
+	for _, s := range prevExcluded {
+		if _, still := nextSet[s]; !still {
+			newlyIncluded = append(newlyIncluded, s)
+		}
+	}
+
+	if _, err := config.UpdateAppPrefs(prefsPath, func(p *config.AppPrefs) {
+		p.SysProxyExcludedServices = nextExcluded
+	}); err != nil {
+		return SysProxyServicesState{Supported: true}, fmt.Errorf("保存系统代理排除网卡配置失败: %w", err)
+	}
+
+	sf.SetExcludedServices(nextExcluded)
+	e.mu.Lock()
+	e.sysProxyExcluded = append([]string(nil), nextExcluded...)
+	e.mu.Unlock()
+
+	// 新排除的网卡：若当前挂着指向本机端口的代理，顺手清理掉（不误伤用户手工配置的其他代理）
+	for _, svc := range newlyExcluded {
+		changed, err := sf.DisableServiceIfMatches(svc, "127.0.0.1", port)
+		if err != nil {
+			log.Printf("[engine] 清理已排除网卡 [%s] 系统代理失败: %v", svc, err)
+		} else if changed {
+			log.Printf("[engine] 已清理被排除网卡 [%s] 的本机系统代理 (127.0.0.1:%d)", svc, port)
+		}
+	}
+
+	// 新恢复的网卡：若当前系统代理处于开启状态，立即补开该网卡的系统代理
+	if sysOn {
+		for _, svc := range newlyIncluded {
+			if err := sf.EnableService(svc, "127.0.0.1", port); err != nil {
+				log.Printf("[engine] 为已恢复网卡 [%s] 开启系统代理失败: %v", svc, err)
+			} else {
+				log.Printf("[engine] 已为恢复勾选的网卡 [%s] 开启系统代理 (127.0.0.1:%d)", svc, port)
+			}
+		}
+	}
+
+	log.Printf("[engine] 系统代理排除网卡已更新: excluded=%v", nextExcluded)
+	e.syncSystemProxyLocked()
+	e.emit()
+
+	e.mu.RLock()
+	state := e.buildSysProxyServicesStateLocked()
+	e.mu.RUnlock()
+	return state, nil
+}
+
+// SetSysProxyServiceEnabled 切换单个网络服务是否参与系统代理（enabled=false 表示排除）。
+func (e *Engine) SetSysProxyServiceEnabled(service string, enabled bool) (SysProxyServicesState, error) {
+	sf, ok := e.sysProxy.(sysproxy.ServiceFilterManager)
+	if !ok {
+		return SysProxyServicesState{Supported: false}, sysproxy.ErrServiceSelectionUnsupported
+	}
+	target := strings.TrimSpace(service)
+	if target == "" {
+		return SysProxyServicesState{Supported: true}, errors.New("网络服务名称不能为空")
+	}
+
+	// 优先与系统可用服务列表及已排除列表做大小写不敏感匹配，归一化为系统真实服务名
+	if services, err := sf.ListServices(); err == nil {
+		e.mu.Lock()
+		e.sysProxyServices = append([]string(nil), services...)
+		e.mu.Unlock()
+	}
+
+	e.mu.RLock()
+	candidates := append([]string(nil), e.sysProxyServices...)
+	excluded := append([]string(nil), e.sysProxyExcluded...)
+	e.mu.RUnlock()
+
+	resolved := target
+	matched := false
+	for _, s := range candidates {
+		if strings.EqualFold(s, target) {
+			resolved = s
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		for _, s := range excluded {
+			if strings.EqualFold(s, target) {
+				resolved = s
+				matched = true
+				break
+			}
+		}
+	}
+	if !matched && !enabled && len(candidates) > 0 {
+		return SysProxyServicesState{Supported: true}, fmt.Errorf("未找到网络服务 %q（可用服务: %s）", target, strings.Join(candidates, ", "))
+	}
+
+	next := make([]string, 0, len(excluded)+1)
+	exists := false
+	for _, s := range excluded {
+		if s == resolved {
+			exists = true
+			if !enabled {
+				next = append(next, s)
+			}
+			continue
+		}
+		next = append(next, s)
+	}
+	if !enabled && !exists {
+		next = append(next, resolved)
+	}
+
+	return e.SetSysProxyExcludedServices(next)
+}
+
+func (e *Engine) buildSysProxyServicesStateLocked() SysProxyServicesState {
+	if !e.sysProxyServiceSupported {
+		return SysProxyServicesState{Supported: false}
+	}
+	excludedSet := make(map[string]struct{}, len(e.sysProxyExcluded))
+	for _, s := range e.sysProxyExcluded {
+		excludedSet[s] = struct{}{}
+	}
+	items := make([]SysProxyServiceItem, 0, len(e.sysProxyServices))
+	for _, s := range e.sysProxyServices {
+		_, ex := excludedSet[s]
+		items = append(items, SysProxyServiceItem{
+			Name:     s,
+			Excluded: ex,
+		})
+	}
+	return SysProxyServicesState{
+		Supported: true,
+		Services:  items,
+		Excluded:  append([]string(nil), e.sysProxyExcluded...),
+	}
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // LocalProxyURL 在隧道已连上且本地代理已启动时返回本地混合代理地址，

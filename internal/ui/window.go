@@ -1139,6 +1139,11 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 					}, toggleToast("自动系统代理", v))
 				})
 
+				if snap.SysProxyServiceSelectionSupported {
+					ui.Divider(c)
+					vm.renderSysProxyServicesSection(c, p, snap)
+				}
+
 				if snap.ProxyAuthEnabled {
 					ui.Text(c, "已启用本地代理鉴权").FontSize(11).TextColor(p.textMuted)
 				}
@@ -1282,6 +1287,97 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 				ui.Divider(c)
 				vm.renderUpdateSection(c, p)
 			})
+		})
+	})
+}
+
+func (vm *viewModel) renderSysProxyServicesSection(c *ui.Context, p palette, snap engine.Snapshot) {
+	excludedSet := make(map[string]struct{}, len(snap.SysProxyExcludedServices))
+	for _, s := range snap.SysProxyExcludedServices {
+		excludedSet[s] = struct{}{}
+	}
+
+	type svcRow struct {
+		name     string
+		excluded bool
+		missing  bool
+	}
+	rows := make([]svcRow, 0, len(snap.SysProxyServices)+len(snap.SysProxyExcludedServices))
+	seen := make(map[string]struct{}, len(snap.SysProxyServices))
+	activeCount := 0
+	for _, s := range snap.SysProxyServices {
+		seen[s] = struct{}{}
+		_, ex := excludedSet[s]
+		if !ex {
+			activeCount++
+		}
+		rows = append(rows, svcRow{name: s, excluded: ex})
+	}
+	for _, ex := range snap.SysProxyExcludedServices {
+		if _, ok := seen[ex]; ok {
+			continue
+		}
+		rows = append(rows, svcRow{name: ex, excluded: true, missing: true})
+	}
+
+	desc := "取消勾选将跳过该网卡并清理其本机代理"
+	if len(snap.SysProxyServices) > 0 {
+		desc = fmt.Sprintf("已启用 %d/%d 个 · 取消勾选将跳过并清理该网卡本机代理", activeCount, len(snap.SysProxyServices))
+	}
+
+	ui.Column(c.Key("sysproxy-services")).Gap(7).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Column(c).Grow(1).Gap(2).Children(func() {
+				ui.Text(c, "系统代理作用网卡").FontSize(12.5).TextColor(p.text)
+				ui.Text(c, desc).FontSize(11).TextColor(p.textMuted).Wrap()
+			})
+			if renderToolbarIconBtn(c, p, "btn-refresh-sysproxy-svcs", "刷新网卡", "刷新系统网络服务列表", svgRefresh, false, p.accent, p.accentSoft, p.borderStrong, false) {
+				vm.runAsync(func() error {
+					_, err := vm.app.eng.SysProxyServices(true)
+					return err
+				}, "已刷新网卡列表")
+			}
+		})
+
+		if len(rows) == 0 {
+			ui.Text(c, "未检测到可用网络服务，可点击右侧按钮刷新").FontSize(11).TextColor(p.textMuted)
+			return
+		}
+
+		ui.Column(c).Gap(5).Children(func() {
+			for i, row := range rows {
+				svcName := row.name
+				enabled := !row.excluded
+				rowKey := fmt.Sprintf("sysproxy-svc-%d", i)
+				ui.Row(c.Key(rowKey)).AlignItems(ui.Center).Gap(8).
+					Padding(6, 9).Radius(8).Background(p.cardElevated).Border(1, p.border).
+					Children(func() {
+						ui.Row(c).Grow(1).AlignItems(ui.Center).Gap(6).Children(func() {
+							nameColor := p.text
+							if row.excluded {
+								nameColor = p.textMuted
+							}
+							ui.Text(c, svcName).FontSize(12).TextColor(nameColor).Ellipsis("…")
+							if row.excluded {
+								renderMiniTag(c, "已排除", p.warning, p.warningSoft)
+							}
+							if row.missing {
+								renderMiniTag(c, "未检测到", p.textMuted, p.pillBg)
+							}
+						})
+						if ui.Switch(c.Key(rowKey+"-sw"), &enabled).Cursor(ui.CursorPointer).Changed() {
+							next := enabled
+							toast := "已启用 " + svcName
+							if !next {
+								toast = "已排除 " + svcName
+							}
+							vm.runAsync(func() error {
+								_, err := vm.app.eng.SetSysProxyServiceEnabled(svcName, next)
+								return err
+							}, toast)
+						}
+					})
+			}
 		})
 	})
 }
