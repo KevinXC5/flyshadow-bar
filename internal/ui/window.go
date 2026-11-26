@@ -28,6 +28,7 @@ type viewModel struct {
 
 	snap           engine.Snapshot
 	activeTab      int // 0=节点, 1=规则, 2=连接, 3=设置
+	windowPinned   bool
 	searchQuery    string
 	onlyStarred    bool
 	sortByDelay    bool
@@ -136,10 +137,35 @@ func newViewModel(app *App, initial engine.Snapshot) *viewModel {
 		ruleFilterAction: -1,
 		procOnlyProxy:    true,
 	}
-	if app != nil && app.updates != nil {
-		vm.applyNativeUpdateStatus(app.updates.Status())
+	if app != nil {
+		vm.windowPinned = app.isWindowPinned()
+		if app.updates != nil {
+			vm.applyNativeUpdateStatus(app.updates.Status())
+		}
 	}
 	return vm
+}
+
+func (vm *viewModel) isWindowPinned() bool {
+	if vm.app != nil {
+		return vm.app.isWindowPinned()
+	}
+	return vm.windowPinned
+}
+
+func (vm *viewModel) toggleWindowPinned() {
+	var next bool
+	if vm.app != nil {
+		next = vm.app.toggleWindowPinned()
+	} else {
+		vm.windowPinned = !vm.windowPinned
+		next = vm.windowPinned
+	}
+	if next {
+		vm.showToast("已置顶窗口")
+	} else {
+		vm.showToast("已取消置顶")
+	}
 }
 
 func (vm *viewModel) applyNativeUpdateStatus(st UpdateStatus) {
@@ -344,15 +370,28 @@ func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 			ui.Text(c, "FlyShadow Bar").FontSize(13).Bold().TextColor(p.text)
 		})
 		ui.Spacer(c)
-		prevTab := vm.activeTab
-		if renderSegmented(c.Key("nav-tabs"), p, &vm.activeTab, "节点", "规则", "连接", "设置").Changed() {
-			if vm.activeTab != 2 {
-				vm.connSortMenuOpen = false
+		ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
+			prevTab := vm.activeTab
+			if renderSegmented(c.Key("nav-tabs"), p, &vm.activeTab, "节点", "规则", "连接", "设置").Changed() {
+				if vm.activeTab != 2 {
+					vm.connSortMenuOpen = false
+				}
+				if vm.activeTab == 2 && prevTab != 2 && vm.app != nil {
+					go vm.app.refreshConnections()
+				}
 			}
-			if vm.activeTab == 2 && prevTab != 2 && vm.app != nil {
-				go vm.app.refreshConnections()
+
+			pinned := vm.isWindowPinned()
+			pinIcon := svgPin
+			pinTip := "置顶窗口（切换应用时不自动收起）"
+			if pinned {
+				pinIcon = svgPinFilled
+				pinTip = "取消置顶（恢复失焦自动收起）"
 			}
-		}
+			if renderToolbarIconBtn(c, p, "btn-pin-window", "置顶窗口", pinTip, pinIcon, pinned, p.accent, p.accentSoft, p.borderStrong, false) {
+				vm.toggleWindowPinned()
+			}
+		})
 	})
 }
 

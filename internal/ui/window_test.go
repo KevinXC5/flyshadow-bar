@@ -462,7 +462,81 @@ func TestShouldHideOnBlurAcrossAllTabs(t *testing.T) {
 	}
 	vm.updateDownloading = false
 	if shouldHideOnBlur(false, true, true, vm) {
-		t.Fatalf("pinWindow (--show) should prevent hide on blur")
+		t.Fatalf("pinWindow should prevent hide on blur")
+	}
+}
+
+func TestWindowPinButtonTogglesBlurHideAndLayout(t *testing.T) {
+	app := &App{}
+	vm := newViewModel(app, engine.Snapshot{
+		State:     engine.StateConnected,
+		ModeCode:  core.ProxyModeRule,
+		ProxyPort: 7890,
+	})
+	vm.activeTab = 2
+	vm.toastVisibleFn = func() bool { return true }
+	app.vm = vm
+
+	tt := ui.NewTester(vm.render, 500, 780)
+	if vm.isWindowPinned() || !shouldHideOnBlur(false, app.isWindowPinned(), true, vm) {
+		t.Fatalf("window should start unpinned and hide on blur")
+	}
+
+	// 验证置顶按钮位于标题栏右侧导航之后且与内容区右边缘（14px）对齐
+	pinNode, okPin := tt.Access("置顶窗口")
+	tabNode, okTab := tt.AccessByRole(ui.RoleRadio, "设置")
+	if !okPin || !okTab {
+		t.Fatalf("missing titlebar controls: okPin=%v okTab=%v", okPin, okTab)
+	}
+	if pinNode.Bounds.X <= tabNode.Bounds.X+tabNode.Bounds.W {
+		t.Fatalf("pin button should sit to the right of nav tabs: pin=%+v tab=%+v", pinNode.Bounds, tabNode.Bounds)
+	}
+	rightGap := 500 - (pinNode.Bounds.X + pinNode.Bounds.W)
+	if absFloat32(rightGap-14) > 1.5 {
+		t.Fatalf("pin button right edge should align with 14px inset, got %.1f (bounds=%+v)", rightGap, pinNode.Bounds)
+	}
+
+	// 点击置顶按钮：状态开启、弹出提示、失焦不再自动收起
+	if err := tt.Click("置顶窗口"); err != nil {
+		t.Fatalf("click 置顶窗口 to enable: %v", err)
+	}
+	if !app.isWindowPinned() || !vm.isWindowPinned() {
+		t.Fatalf("expected window to be pinned after click")
+	}
+	if shouldHideOnBlur(false, app.isWindowPinned(), true, vm) {
+		t.Fatalf("pinned window should not hide on blur")
+	}
+	if !tt.HasText("已置顶窗口") {
+		t.Fatalf("expected pin toast 已置顶窗口, got texts=%v", tt.Texts())
+	}
+
+	// 再次点击置顶按钮：状态关闭、恢复失焦自动收起
+	if err := tt.Click("置顶窗口"); err != nil {
+		t.Fatalf("click 置顶窗口 to disable: %v", err)
+	}
+	if app.isWindowPinned() || vm.isWindowPinned() {
+		t.Fatalf("expected window to be unpinned after second click")
+	}
+	if !shouldHideOnBlur(false, app.isWindowPinned(), true, vm) {
+		t.Fatalf("unpinned window should hide on blur")
+	}
+	if !tt.HasText("已取消置顶") {
+		t.Fatalf("expected unpin toast 已取消置顶, got texts=%v", tt.Texts())
+	}
+
+	// 验证最小宽度 440px 下标题栏无重叠且不越界
+	ttNarrow := ui.NewTester(vm.render, 440, 600)
+	narrowTitle, okTitle := ttNarrow.Find("FlyShadow Bar")
+	narrowTab, okFirstTab := ttNarrow.AccessByRole(ui.RoleRadio, "节点")
+	narrowPin, okNarrowPin := ttNarrow.Access("置顶窗口")
+	if !okTitle || !okFirstTab || !okNarrowPin {
+		t.Fatalf("narrow titlebar missing elements: title=%v tab=%v pin=%v", okTitle, okFirstTab, okNarrowPin)
+	}
+	if narrowTitle.X+narrowTitle.W+8 > narrowTab.Bounds.X {
+		t.Fatalf("narrow titlebar text collides with nav tabs: title=%+v tab=%+v", narrowTitle, narrowTab.Bounds)
+	}
+	if narrowPin.Bounds.X+narrowPin.Bounds.W > 440 {
+		t.Fatalf("narrow pin button overflows window width: %+v", narrowPin.Bounds)
 	}
 }
 
@@ -666,11 +740,16 @@ func TestInteractiveControlsUsePointerCursor(t *testing.T) {
 		}
 	}
 
-	// 1. 顶部导航分段控件「规则」
+	// 1. 顶部导航分段控件「规则」与右上角「置顶窗口」按钮
 	if tab, ok := tt.AccessByRole(ui.RoleRadio, "规则"); !ok {
 		t.Fatalf("nav segmented tab 规则 not found")
 	} else {
 		assertPointerAt("顶部导航-规则", tab.Bounds)
+	}
+	if pinBtn, ok := tt.Access("置顶窗口"); !ok {
+		t.Fatalf("title bar pin button 置顶窗口 not found")
+	} else {
+		assertPointerAt("标题栏-置顶窗口", pinBtn.Bounds)
 	}
 
 	// 2. 顶部快捷开关（系统代理 / UDP 加速 / 原生 UDP）

@@ -41,7 +41,7 @@ type App struct {
 	updateProgressReset func()
 
 	quitting     bool
-	pinWindow    bool // 显式 --show 启动时不随失焦自动收起
+	pinWindow    bool // 置顶窗口：开启后失焦不自动收起（--show 启动默认开启，也可由标题栏置顶按钮随时切换）
 	lastBlurHide time.Time
 	unsub        func()
 	stopCh       chan struct{}
@@ -160,7 +160,7 @@ func (a *App) onReady(opts RunOptions) {
 	// 仅在显式传 --show（钉住窗口）或 --relaunch（更新重启后弹出一次，失焦仍自动收起）时立即弹窗。
 	hidden := opts.StartHidden || mygo.App.WasOpenedAtLogin()
 	if !hidden {
-		a.pinWindow = true
+		a.setWindowPinned(true)
 		a.ensureWindow()
 		a.showWindow()
 	} else if opts.ShowOnceOnStart {
@@ -289,7 +289,7 @@ func (a *App) ensureWindow() {
 			a.refreshTrayMenu()
 		}
 	})
-	// 托盘弹窗体验：点击面板外部自动收起（更新下载中、配置弹窗打开或显式 --show 时保留不收起）
+	// 托盘弹窗体验：点击面板外部自动收起（已置顶、更新下载中或模态弹窗打开时保留不收起）
 	a.win.OnBlur(func() {
 		if !shouldHideOnBlur(a.quitting, a.pinWindow, a.win != nil && a.win.IsVisible(), a.vm) {
 			return
@@ -387,6 +387,28 @@ func (a *App) isWindowVisible() bool {
 	return a.win != nil && a.win.IsVisible()
 }
 
+func (a *App) isWindowPinned() bool {
+	return a.pinWindow
+}
+
+// setWindowPinned 更新窗口置顶状态，开启后窗口在失焦时保持可见且始终悬浮于其他窗口之上。
+func (a *App) setWindowPinned(pinned bool) {
+	a.pinWindow = pinned
+	if a.vm != nil {
+		a.vm.windowPinned = pinned
+	}
+	if a.win != nil {
+		a.win.SetAlwaysOnTop(true)
+		a.win.Invalidate()
+	}
+}
+
+func (a *App) toggleWindowPinned() bool {
+	next := !a.pinWindow
+	a.setWindowPinned(next)
+	return next
+}
+
 func (a *App) showWindow() {
 	a.ensureWindow()
 	if a.win == nil {
@@ -416,7 +438,7 @@ func (a *App) hideWindow() {
 	a.refreshTrayMenu()
 }
 
-// shouldHideOnBlur 判断主窗口失焦时是否应自动收起（所有主标签页均一致自动收起，仅更新下载中、模态弹窗打开或 --show 钉住时保持可见）。
+// shouldHideOnBlur 判断主窗口失焦时是否应自动收起（所有主标签页均一致自动收起，仅置顶窗口、更新下载中或模态弹窗打开时保持可见）。
 func shouldHideOnBlur(quitting, pinWindow, visible bool, vm *viewModel) bool {
 	if quitting || pinWindow || !visible {
 		return false
