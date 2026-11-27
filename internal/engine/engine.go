@@ -65,11 +65,16 @@ type SysProxyServicesState struct {
 }
 
 const (
+	// DefaultAutoSyncInterval 是启动建连后与打开主面板时自动静默同步订阅的最小间隔。
+	DefaultAutoSyncInterval = 5 * time.Minute
+
 	maxSpeedHistoryPoints           = 48
 	defaultSysProxyCheckInterval    = 3 * time.Second
 	defaultConnectPollInterval      = 200 * time.Millisecond
 	defaultConnectPollAttempts      = 40 // 40 * 200ms = 8s，与官方 ProxyService 一致
 	defaultDisconnectErrorThreshold = 8  // 已连上后连续 8 秒底层状态非 0 则转为连接异常提示
+	defaultPingRetryDelay           = 300 * time.Millisecond
+	activeTrafficGraceWindow        = 5 * time.Second
 )
 
 // Snapshot 是整个客户端运行状态的只读快照，用于 UI、托盘与本地控制 API。
@@ -150,14 +155,18 @@ type Engine struct {
 	geoIPPath   string
 	ruleCount   int
 
-	state              TunnelState
-	lastError          string
-	tunnelDesired      bool // 用户/启动流程期望隧道保持在线，用于断线后的状态追踪与自动恢复
-	tunnelOpInProgress bool // 正在执行建连/切换/断开操作时暂停后台 sampleStats 写状态，避免竞态
-	disconnectStreak   int  // 连续采样到 TunnelStatus != 0 的次数
-	systemProxyOn      bool
-	proxyStarted       bool
-	syncing            bool
+	state               TunnelState
+	lastError           string
+	tunnelDesired       bool      // 用户/启动流程期望隧道保持在线，用于断线后的状态追踪与自动恢复
+	tunnelOpInProgress  bool      // 正在执行建连/切换/断开操作时暂停后台 sampleStats 写状态，避免竞态
+	disconnectStreak    int       // 连续采样到 TunnelStatus != 0 的次数
+	probeFailed         bool      // 当前节点经测速复测仍超时且无活跃流量，防止底层僵尸 status==0 误显示“已连接”
+	lastActiveTraffic   time.Time // 最近一次观测到隧道真实上下行流量的时间
+	systemProxyOn       bool
+	proxyStarted        bool
+	syncing             bool
+	lastAutoSyncAttempt time.Time        // 最近一次自动静默同步尝试时间，用于失败冷却避免反复请求
+	nowFn               func() time.Time // 可注入时钟，默认使用 time.Now
 
 	delays        map[int]int64
 	testingNodes  map[int]bool
@@ -185,6 +194,7 @@ type Engine struct {
 	connectPollInterval      time.Duration
 	connectPollAttempts      int
 	disconnectErrorThreshold int
+	pingRetryDelay           time.Duration
 	loopsOnce                sync.Once
 
 	stopCh   chan struct{}
@@ -238,6 +248,7 @@ func New(opts Options) (*Engine, error) {
 		connectPollInterval:      defaultConnectPollInterval,
 		connectPollAttempts:      defaultConnectPollAttempts,
 		disconnectErrorThreshold: defaultDisconnectErrorThreshold,
+		pingRetryDelay:           defaultPingRetryDelay,
 		stopCh:                   make(chan struct{}),
 		tunnelPingMs:             -1,
 	}
@@ -318,17 +329,11 @@ func (e *Engine) Start(autoConnect bool) error {
 			}
 		}
 		// 首次建连后若配置包含订阅凭据且距上次同步超过 5 分钟，后台静默刷新流量、到期时间、节点与云端规则
-		e.mu.RLock()
-		shouldSync := !e.disableAutoSysProxy && e.cfg.SubscribePassword != "" &&
-			(e.cfg.LastUpdateTime == 0 || time.Since(time.UnixMilli(int64(e.cfg.LastUpdateTime))) > 5*time.Minute)
-		e.mu.RUnlock()
-		if shouldSync {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-				defer cancel()
-				_, _ = e.SyncSubscription(ctx)
-			}()
-		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			_, _ = e.SyncSubscriptionIfStale(ctx, DefaultAutoSyncInterval)
+		}()
 	}
 	return nil
 }
@@ -346,6 +351,8 @@ func (e *Engine) Shutdown() {
 	e.tunnelOpInProgress = true
 	e.tunnelDesired = false
 	e.disconnectStreak = 0
+	e.probeFailed = false
+	e.lastActiveTraffic = time.Time{}
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
@@ -536,6 +543,8 @@ func (e *Engine) Disconnect() error {
 	e.tunnelOpInProgress = true
 	e.tunnelDesired = false
 	e.disconnectStreak = 0
+	e.probeFailed = false
+	e.lastActiveTraffic = time.Time{}
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
@@ -1099,6 +1108,47 @@ func (e *Engine) localProxyURLForCloud() string {
 	return e.LocalProxyURL()
 }
 
+func (e *Engine) now() time.Time {
+	if e.nowFn != nil {
+		return e.nowFn()
+	}
+	return time.Now()
+}
+
+// SyncSubscriptionIfStale 在距上次同步（及上次自动尝试）超过 minInterval 时触发后台静默订阅同步。
+// 返回 triggered=true 表示本次确实发起了同步调用；未配置凭据、处于隔离模式、引擎未启动或仍在冷却期内时直接跳过。
+func (e *Engine) SyncSubscriptionIfStale(ctx context.Context, minInterval time.Duration) (bool, error) {
+	if e.cloud == nil {
+		return false, nil
+	}
+	if minInterval <= 0 {
+		minInterval = DefaultAutoSyncInterval
+	}
+
+	e.mu.Lock()
+	if e.disableAutoSysProxy || !e.proxyStarted || e.syncing || e.cfg == nil || e.cfg.SubscribePassword == "" {
+		e.mu.Unlock()
+		return false, nil
+	}
+	now := e.now()
+	if e.cfg.LastUpdateTime > 0 && now.Sub(time.UnixMilli(int64(e.cfg.LastUpdateTime))) < minInterval {
+		e.mu.Unlock()
+		return false, nil
+	}
+	if !e.lastAutoSyncAttempt.IsZero() && now.Sub(e.lastAutoSyncAttempt) < minInterval {
+		e.mu.Unlock()
+		return false, nil
+	}
+	e.lastAutoSyncAttempt = now
+	e.mu.Unlock()
+
+	_, err := e.SyncSubscription(ctx)
+	if err != nil {
+		log.Printf("[engine] 自动静默同步订阅失败: %v", err)
+	}
+	return true, err
+}
+
 // SyncSubscription 从官方云端同步最新订阅节点、流量用量、到期时间、VIP 等级与自定义分流规则，
 // 无损保存至 config.json 并立即热重载核心规则（不断开当前隧道）。
 func (e *Engine) SyncSubscription(ctx context.Context) (Snapshot, error) {
@@ -1139,7 +1189,7 @@ func (e *Engine) SyncSubscription(ctx context.Context) (Snapshot, error) {
 	defer e.opMu.Unlock()
 
 	e.mu.Lock()
-	e.cfg.ApplySyncedData(*sub, customRules, time.Now())
+	e.cfg.ApplySyncedData(*sub, customRules, e.now())
 	saveErr := e.cfg.Save()
 	e.mu.Unlock()
 	if saveErr != nil {
@@ -1200,7 +1250,7 @@ func (e *Engine) SetSubscribePassword(ctx context.Context, password string) (Sna
 
 	e.mu.Lock()
 	e.cfg.SetSubscribePassword(pw)
-	e.cfg.ApplySyncedData(*sub, customRules, time.Now())
+	e.cfg.ApplySyncedData(*sub, customRules, e.now())
 	saveErr := e.cfg.Save()
 	e.mu.Unlock()
 	if saveErr != nil {
@@ -1692,16 +1742,14 @@ func (e *Engine) PingAll(ctx context.Context) ([]NodeSnapshot, error) {
 			defer func() { <-sem }()
 
 			enableQuic := udpAcc && n.SupportsQuic()
-			delay := e.core.TestTunnelDelay(n, enableQuic)
-			if delay <= 0 {
-				delay = -1
-			}
+			delay := e.testNodeDelay(ctx, n, enableQuic)
 
 			e.mu.Lock()
 			e.delays[n.ID] = delay
 			delete(e.testingNodes, n.ID)
 			e.pingCompleted++
 			e.mu.Unlock()
+			e.reconcileCurrentNodeDelay(n, delay)
 			e.emit()
 		}(node)
 	}
@@ -1747,17 +1795,135 @@ func (e *Engine) PingNode(nodeID int) (int64, error) {
 	e.emit()
 
 	enableQuic := udpAcc && target.SupportsQuic()
-	delay := e.core.TestTunnelDelay(*target, enableQuic)
-	if delay <= 0 {
-		delay = -1
-	}
+	delay := e.testNodeDelay(context.Background(), *target, enableQuic)
 
 	e.mu.Lock()
 	e.delays[nodeID] = delay
 	delete(e.testingNodes, nodeID)
 	e.mu.Unlock()
+	e.reconcileCurrentNodeDelay(*target, delay)
 	e.emit()
 	return delay, nil
+}
+
+// testNodeDelay 执行单节点延迟探测；若目标正好是当前活跃节点且首次测速超时，
+// 自动短暂等待后复测一次以排除并发拥堵或偶发 UDP/QUIC 丢包误报。
+func (e *Engine) testNodeDelay(ctx context.Context, node config.Node, enableQuic bool) int64 {
+	delay := e.core.TestTunnelDelay(node, enableQuic)
+	if delay > 0 {
+		return delay
+	}
+
+	e.mu.RLock()
+	isCurrentActive := e.cfg != nil && e.cfg.CurrentNode() != nil && e.cfg.CurrentNode().ID == node.ID &&
+		(e.state == StateConnected || e.state == StateConnecting)
+	retryDelay := e.pingRetryDelay
+	e.mu.RUnlock()
+
+	if isCurrentActive && ctx.Err() == nil {
+		if retryDelay > 0 {
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return -1
+			case <-e.stopCh:
+				timer.Stop()
+				return -1
+			case <-timer.C:
+			}
+		}
+		delay = e.core.TestTunnelDelay(node, enableQuic)
+		if delay > 0 {
+			return delay
+		}
+	}
+	return -1
+}
+
+// reconcileCurrentNodeDelay 将当前选中节点的实测结果与顶部隧道状态联动：
+// - 若当前活跃节点连续复测仍超时且近期无真实数据流量，及时从“已连接”转为“连接异常”并记录探活失败，
+//   避免底层核心库处于半开/僵尸连接（TunnelStatus 仍返回 0）时界面仍误显示“已连接”。
+// - 若此前因探活失败处于异常态且复测恢复连通、底层状态正常，自动恢复为“已连接”。
+func (e *Engine) reconcileCurrentNodeDelay(node config.Node, delay int64) {
+	e.mu.RLock()
+	cur := e.cfg.CurrentNode()
+	isCurrent := cur != nil && cur.ID == node.ID
+	opInProgress := e.tunnelOpInProgress
+	state := e.state
+	desired := e.tunnelDesired
+	probeFailed := e.probeFailed
+	e.mu.RUnlock()
+
+	if !isCurrent || opInProgress {
+		return
+	}
+
+	if delay < 0 {
+		if state != StateConnected && state != StateConnecting {
+			return
+		}
+		status := e.core.TunnelStatus()
+		now := e.now()
+
+		var logMsg string
+		e.mu.Lock()
+		// 二次校验防止与并发切节点/断开操作竞态
+		curNow := e.cfg.CurrentNode()
+		if e.tunnelOpInProgress || curNow == nil || curNow.ID != node.ID ||
+			(e.state != StateConnected && e.state != StateConnecting) {
+			e.mu.Unlock()
+			return
+		}
+		// 若底层状态正常且最近 5 秒内仍有真实上下行流量，说明现有隧道正在工作，不误判为断连
+		hasRecentTraffic := status == 0 && !e.lastActiveTraffic.IsZero() && now.Sub(e.lastActiveTraffic) <= activeTrafficGraceWindow
+		if hasRecentTraffic {
+			e.mu.Unlock()
+			log.Printf("[engine] 当前节点测速超时但隧道存在活跃流量，保留已连接状态: id=%d name=%q", node.ID, node.DisplayName())
+			return
+		}
+
+		e.probeFailed = true
+		e.state = StateError
+		e.uploadSpeedBps = 0
+		e.downloadSpeedBps = 0
+		e.tunnelPingMs = -1
+		if status != 0 {
+			e.lastError = fmt.Sprintf("节点 %s 测速超时，连接已断开（状态码 %d）", node.DisplayName(), status)
+			logMsg = fmt.Sprintf("[engine] 当前节点测速超时且底层连接已断开: id=%d name=%q status=%d", node.ID, node.DisplayName(), status)
+		} else {
+			e.lastError = fmt.Sprintf("节点 %s 测速超时，连接可能已断开", node.DisplayName())
+			logMsg = fmt.Sprintf("[engine] 当前节点复测仍超时且无活跃流量，已转为连接异常: id=%d name=%q", node.ID, node.DisplayName())
+		}
+		e.mu.Unlock()
+		if logMsg != "" {
+			log.Print(logMsg)
+		}
+		return
+	}
+
+	// delay > 0：若此前因探活失败进入异常态且底层连接仍有效，则恢复已连接状态
+	if probeFailed && desired && state == StateError {
+		if e.core.TunnelStatus() != 0 {
+			return
+		}
+		var recovered bool
+		e.mu.Lock()
+		curNow := e.cfg.CurrentNode()
+		if !e.tunnelOpInProgress && curNow != nil && curNow.ID == node.ID &&
+			e.probeFailed && e.tunnelDesired && e.state == StateError {
+			e.probeFailed = false
+			e.disconnectStreak = 0
+			e.state = StateConnected
+			e.lastError = ""
+			e.tunnelPingMs = int32(delay)
+			recovered = true
+		}
+		e.mu.Unlock()
+		if recovered {
+			log.Printf("[engine] 当前节点测速恢复连通，已恢复已连接状态: id=%d name=%q delay=%dms", node.ID, node.DisplayName(), delay)
+		}
+	}
 }
 
 func (e *Engine) applyConfigToCoreLocked() {
@@ -1908,18 +2074,22 @@ func (e *Engine) connectCurrentLocked() error {
 		e.state = StateConnected
 		e.tunnelDesired = true
 		e.disconnectStreak = 0
+		e.probeFailed = false
+		e.lastActiveTraffic = time.Time{}
 		e.lastError = ""
 		e.lastUploadBytes = 0
 		e.lastDownloadBytes = 0
 		e.uploadSpeedBps = 0
 		e.downloadSpeedBps = 0
-		e.lastSampleTime = time.Now()
+		e.lastSampleTime = e.now()
 		e.tunnelPingMs = e.core.TunnelPingDelay()
 		log.Printf("[engine] 节点已连接: id=%d name=%q ping=%dms", node.ID, node.DisplayName(), e.tunnelPingMs)
 	} else {
 		e.state = StateError
 		e.tunnelDesired = false
 		e.disconnectStreak = 0
+		e.probeFailed = false
+		e.lastActiveTraffic = time.Time{}
 		e.lastError = fmt.Sprintf("连接节点 %s 超时（状态码 %d）", node.DisplayName(), timeoutStatus)
 		log.Printf("[engine] 节点连接超时: id=%d name=%q status=%d", node.ID, node.DisplayName(), timeoutStatus)
 	}
@@ -1994,19 +2164,38 @@ func (e *Engine) sampleStats(now time.Time) {
 
 	if status == 0 {
 		prevState := e.state
+		hadDisconnect := e.disconnectStreak > 0
 		e.disconnectStreak = 0
-		if prevState != StateConnected {
-			e.state = StateConnected
-			e.lastError = ""
-			logMsg = fmt.Sprintf("[engine] 隧道已恢复连接: id=%d name=%q ping=%dms", nodeID, nodeName, ping)
+		if up > 0 || down > 0 {
+			e.lastActiveTraffic = now
 		}
-		e.uploadSpeedBps = up
-		e.downloadSpeedBps = down
-		e.lastUploadBytes += up
-		e.lastDownloadBytes += down
-		e.lastSampleTime = now
-		e.tunnelPingMs = ping
-		e.appendSpeedSampleLocked(up, down)
+		if e.probeFailed {
+			// 若此前测速判定当前节点不可达，仅在观测到真实流量或底层经历断线后重连成功时才恢复“已连接”，
+			// 防止半开僵尸隧道继续返回 status==0 导致界面重新误显示“已连接”。
+			if up > 0 || down > 0 || hadDisconnect {
+				e.probeFailed = false
+			} else {
+				e.uploadSpeedBps = 0
+				e.downloadSpeedBps = 0
+				e.lastSampleTime = now
+				e.tunnelPingMs = -1
+				e.appendSpeedSampleLocked(0, 0)
+			}
+		}
+		if !e.probeFailed {
+			if prevState != StateConnected {
+				e.state = StateConnected
+				e.lastError = ""
+				logMsg = fmt.Sprintf("[engine] 隧道已恢复连接: id=%d name=%q ping=%dms", nodeID, nodeName, ping)
+			}
+			e.uploadSpeedBps = up
+			e.downloadSpeedBps = down
+			e.lastUploadBytes += up
+			e.lastDownloadBytes += down
+			e.lastSampleTime = now
+			e.tunnelPingMs = ping
+			e.appendSpeedSampleLocked(up, down)
+		}
 	} else {
 		prevState := e.state
 		e.disconnectStreak++

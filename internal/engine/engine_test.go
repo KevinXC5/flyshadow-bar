@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +33,8 @@ type mockCore struct {
 	upload       int64
 	download     int64
 	delayResults map[int]int64
+	delaySeq     map[int][]int64
+	delayCalls   map[int]int
 	conns        []core.ConnectionInfo
 }
 
@@ -104,6 +108,17 @@ func (m *mockCore) CloseTunnel() int32 {
 func (m *mockCore) TestTunnelDelay(node config.Node, _ bool) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.delayCalls == nil {
+		m.delayCalls = make(map[int]int)
+	}
+	idx := m.delayCalls[node.ID]
+	m.delayCalls[node.ID] = idx + 1
+	if seq, ok := m.delaySeq[node.ID]; ok && len(seq) > 0 {
+		if idx < len(seq) {
+			return seq[idx]
+		}
+		return seq[len(seq)-1]
+	}
 	if v, ok := m.delayResults[node.ID]; ok {
 		return v
 	}
@@ -277,6 +292,8 @@ type mockCloud struct {
 	expectedPassword string
 	sub              config.SubscribeInfo
 	rules            []config.DomainRule
+	fetchCalls       int
+	fetchErr         error
 	savedCalls       int
 	updatedCalls     int
 	removedIDs       []int
@@ -286,6 +303,10 @@ type mockCloud struct {
 func (m *mockCloud) FetchSubscribe(_ context.Context, pw, _ string) (*config.SubscribeInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.fetchCalls++
+	if m.fetchErr != nil {
+		return nil, m.fetchErr
+	}
 	if m.expectedPassword != "" && pw != m.expectedPassword {
 		return nil, os.ErrPermission
 	}
@@ -840,5 +861,239 @@ func TestEngineSysProxyServiceFilteringUnsupportedPlatform(t *testing.T) {
 	}
 	if _, err := eng.SetSysProxyServiceEnabled("Wi-Fi", false); !errors.Is(err, sysproxy.ErrServiceSelectionUnsupported) {
 		t.Fatalf("expected ErrServiceSelectionUnsupported, got %v", err)
+	}
+}
+
+func TestEngineSyncSubscriptionIfStale(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	baseNow := time.Date(2026, 11, 27, 23, 0, 0, 0, time.UTC)
+	staleMillis := baseNow.Add(-6 * time.Minute).UnixMilli()
+	rawCfg := `{
+  "subscribePassword": "mock-cloud-password",
+  "proxyPort": 17892,
+  "proxyType": 3,
+  "lastUpdateTime": ` + strconv.FormatInt(staleMillis, 10) + `,
+  "subscribeInfo": {
+    "node": [{"id": 1, "name": "HK-01", "cnName": "香港节点", "host": "hk.example.invalid", "port": 443}],
+    "user": {"trafficSize": 200000000000, "trafficUpload": 1000000000, "trafficDownload": 2000000000, "level": 3}
+  },
+  "usedNodeInfo": {"id": 1, "name": "HK-01", "cnName": "香港节点", "host": "hk.example.invalid", "port": 443}
+}`
+	if err := os.WriteFile(p, []byte(rawCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mc := &mockCore{}
+	sp := &mockSysProxy{}
+	cc := &mockCloud{
+		sub: config.SubscribeInfo{
+			Nodes: []config.Node{
+				{ID: 1, Name: "HK-01", CNName: "香港节点", Host: "hk.example.invalid", Port: 443},
+			},
+			User: &config.UserTrafficInfo{
+				TrafficSize:     200000000000,
+				TrafficUpload:   3000000000,
+				TrafficDownload: 7000000000,
+				Level:           3,
+			},
+		},
+	}
+
+	eng, err := New(Options{
+		ConfigPath:          p,
+		CoreClient:          mc,
+		SysProxy:            sp,
+		CloudClient:         cc,
+		DisableAutoSysProxy: false,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	curTime := baseNow
+	eng.mu.Lock()
+	eng.nowFn = func() time.Time { return curTime }
+	eng.mu.Unlock()
+
+	// 1. 引擎尚未 Start（本地代理未启动）时跳过自动同步
+	triggered, err := eng.SyncSubscriptionIfStale(context.Background(), DefaultAutoSyncInterval)
+	if err != nil || triggered || cc.fetchCalls != 0 {
+		t.Fatalf("before Start expected skip, got triggered=%v err=%v calls=%d", triggered, err, cc.fetchCalls)
+	}
+
+	// 启动本地代理（不自动连节点，单独测 SyncSubscriptionIfStale）
+	if err := eng.Start(false); err != nil {
+		t.Fatalf("Start(false): %v", err)
+	}
+
+	// 2. 距上次同步已超过 5 分钟，应触发一次静默同步并刷新流量
+	triggered, err = eng.SyncSubscriptionIfStale(context.Background(), DefaultAutoSyncInterval)
+	if err != nil || !triggered || cc.fetchCalls != 1 {
+		t.Fatalf("first stale sync got triggered=%v err=%v calls=%d", triggered, err, cc.fetchCalls)
+	}
+	if snap := eng.Snapshot(); snap.Traffic == nil || snap.Traffic.TrafficDownload != 7000000000 {
+		t.Fatalf("traffic not updated: %+v", snap.Traffic)
+	}
+
+	// 3. 3 分钟后（未满 5 分钟）再次触发应直接跳过
+	curTime = curTime.Add(3 * time.Minute)
+	triggered, err = eng.SyncSubscriptionIfStale(context.Background(), DefaultAutoSyncInterval)
+	if err != nil || triggered || cc.fetchCalls != 1 {
+		t.Fatalf("within 5m should skip, got triggered=%v err=%v calls=%d", triggered, err, cc.fetchCalls)
+	}
+
+	// 4. 再过 3 分钟（累计 6 分钟）触发，但本次云端失败；失败后 5 分钟冷却期内不应反复打请求
+	curTime = curTime.Add(3 * time.Minute)
+	cc.mu.Lock()
+	cc.fetchErr = errors.New("mock cloud down")
+	cc.mu.Unlock()
+
+	triggered, err = eng.SyncSubscriptionIfStale(context.Background(), DefaultAutoSyncInterval)
+	if err == nil || !triggered || cc.fetchCalls != 2 {
+		t.Fatalf("expected failed attempt, got triggered=%v err=%v calls=%d", triggered, err, cc.fetchCalls)
+	}
+
+	curTime = curTime.Add(2 * time.Minute)
+	triggered, err = eng.SyncSubscriptionIfStale(context.Background(), DefaultAutoSyncInterval)
+	if err != nil || triggered || cc.fetchCalls != 2 {
+		t.Fatalf("within failure cooldown should skip, got triggered=%v err=%v calls=%d", triggered, err, cc.fetchCalls)
+	}
+
+	// 5. 冷却期满且云端恢复后，应再次触发并成功刷新流量
+	curTime = curTime.Add(4 * time.Minute)
+	cc.mu.Lock()
+	cc.fetchErr = nil
+	cc.sub.User.TrafficDownload = 9000000000
+	cc.mu.Unlock()
+
+	triggered, err = eng.SyncSubscriptionIfStale(context.Background(), DefaultAutoSyncInterval)
+	if err != nil || !triggered || cc.fetchCalls != 3 {
+		t.Fatalf("after cooldown expected sync, got triggered=%v err=%v calls=%d", triggered, err, cc.fetchCalls)
+	}
+	if snap := eng.Snapshot(); snap.Traffic == nil || snap.Traffic.TrafficDownload != 9000000000 {
+		t.Fatalf("traffic not updated after recovery: %+v", snap.Traffic)
+	}
+}
+
+func TestEnginePingCurrentNodeRetryAndStatusReconcile(t *testing.T) {
+	cfgPath := writeTestConfig(t)
+	mc := &mockCore{
+		delaySeq: map[int][]int64{
+			// 首次抖动超时，复测成功返回 68ms
+			1: {-1, 68},
+		},
+	}
+	sp := &mockSysProxy{}
+	eng, err := New(Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          mc,
+		SysProxy:            sp,
+		DisableAutoSysProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	curTime := time.Date(2026, 11, 27, 23, 10, 0, 0, time.UTC)
+	eng.mu.Lock()
+	eng.pingRetryDelay = 0
+	eng.nowFn = func() time.Time { return curTime }
+	eng.mu.Unlock()
+
+	if err := eng.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	// 1. 当前节点单次抖动超时但复测成功：不应误报超时，顶部维持已连接
+	delay, err := eng.PingNode(1)
+	if err != nil || delay != 68 {
+		t.Fatalf("expected retry delay 68, got (%d, %v)", delay, err)
+	}
+	if snap := eng.Snapshot(); snap.State != StateConnected {
+		t.Fatalf("expected StateConnected after retry success, got %s", snap.State)
+	}
+
+	// 2. 当前节点连续复测均超时且无活跃流量（即使底层 TunnelStatus 仍为僵尸 0）：
+	//    顶部状态应立即转为连接异常，且后续无流量的僵尸采样不能将其改回已连接
+	mc.mu.Lock()
+	mc.delaySeq = map[int][]int64{1: {-1, -1}}
+	mc.delayCalls = map[int]int{}
+	mc.upload = 0
+	mc.download = 0
+	mc.mu.Unlock()
+
+	delay, err = eng.PingNode(1)
+	if err != nil || delay != -1 {
+		t.Fatalf("expected timeout (-1), got (%d, %v)", delay, err)
+	}
+	snap := eng.Snapshot()
+	if snap.State != StateError || !strings.Contains(snap.LastError, "测速超时") || snap.TunnelPingMs != -1 {
+		t.Fatalf("expected StateError on consecutive timeout, got state=%s err=%q ping=%d", snap.State, snap.LastError, snap.TunnelPingMs)
+	}
+
+	curTime = curTime.Add(time.Second)
+	eng.sampleStats(curTime)
+	if snap := eng.Snapshot(); snap.State != StateError {
+		t.Fatalf("zombie status==0 with zero traffic must not revert to StateConnected, got %s", snap.State)
+	}
+
+	// 3. 测速恢复连通且底层 status==0：自动恢复已连接
+	mc.mu.Lock()
+	mc.delaySeq = map[int][]int64{1: {55}}
+	mc.delayCalls = map[int]int{}
+	mc.mu.Unlock()
+
+	delay, err = eng.PingNode(1)
+	if err != nil || delay != 55 {
+		t.Fatalf("expected recovered delay 55, got (%d, %v)", delay, err)
+	}
+	snap = eng.Snapshot()
+	if snap.State != StateConnected || snap.TunnelPingMs != 55 || snap.LastError != "" {
+		t.Fatalf("expected StateConnected after delay recovery, got state=%s ping=%d err=%q", snap.State, snap.TunnelPingMs, snap.LastError)
+	}
+
+	// 4. 隧道存在近期活跃流量时，即使独立测速超时也不误判为断连
+	mc.mu.Lock()
+	mc.download = 128 * 1024
+	mc.mu.Unlock()
+	curTime = curTime.Add(time.Second)
+	eng.sampleStats(curTime)
+
+	mc.mu.Lock()
+	mc.delaySeq = map[int][]int64{1: {-1, -1}}
+	mc.delayCalls = map[int]int{}
+	mc.mu.Unlock()
+	curTime = curTime.Add(2 * time.Second)
+
+	delay, err = eng.PingNode(1)
+	if err != nil || delay != -1 {
+		t.Fatalf("expected timeout (-1) during active traffic, got (%d, %v)", delay, err)
+	}
+	if snap := eng.Snapshot(); snap.State != StateConnected {
+		t.Fatalf("active traffic tunnel should stay StateConnected, got %s", snap.State)
+	}
+
+	// 5. 超过活跃流量宽限期且测速超时转异常后，一旦再次观测到真实流量则自动恢复已连接
+	mc.mu.Lock()
+	mc.download = 0
+	mc.delaySeq = map[int][]int64{1: {-1, -1}}
+	mc.delayCalls = map[int]int{}
+	mc.mu.Unlock()
+	curTime = curTime.Add(10 * time.Second)
+
+	_, _ = eng.PingNode(1)
+	if snap := eng.Snapshot(); snap.State != StateError {
+		t.Fatalf("expected StateError after grace window, got %s", snap.State)
+	}
+
+	mc.mu.Lock()
+	mc.download = 4096
+	mc.mu.Unlock()
+	curTime = curTime.Add(time.Second)
+	eng.sampleStats(curTime)
+	if snap := eng.Snapshot(); snap.State != StateConnected {
+		t.Fatalf("expected real traffic to clear probeFailed and restore StateConnected, got %s", snap.State)
 	}
 }

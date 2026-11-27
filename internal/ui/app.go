@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"runtime"
@@ -417,9 +418,15 @@ func (a *App) showWindow() {
 	if a.win == nil {
 		return
 	}
-	// 弹出主面板时立即向系统核对代理真实状态，防止外部清空后开关仍停留在旧状态
+	// 弹出主面板时立即向系统核对代理真实状态，防止外部清空后开关仍停留在旧状态；
+	// 若距离上次订阅同步已超过 5 分钟，同时在后台静默刷新套餐流量、到期时间、节点与云端规则。
 	if a.eng != nil {
 		go a.eng.RefreshSystemProxy()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			_, _ = a.eng.SyncSubscriptionIfStale(ctx, engine.DefaultAutoSyncInterval)
+		}()
 	}
 	a.win.Restore()
 	a.win.Show()
