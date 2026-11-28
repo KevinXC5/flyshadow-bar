@@ -475,6 +475,18 @@ func TestShouldHideOnBlurAcrossAllTabs(t *testing.T) {
 	}
 }
 
+func TestShouldShowDockIconForCaptureWindow(t *testing.T) {
+	if !shouldShowDockIcon("darwin", true) {
+		t.Fatalf("macOS should show Dock icon while capture window is open")
+	}
+	if shouldShowDockIcon("darwin", false) {
+		t.Fatalf("macOS should hide Dock icon after capture window is closed")
+	}
+	if shouldShowDockIcon("windows", true) {
+		t.Fatalf("Windows uses native taskbar button rather than macOS Dock policy")
+	}
+}
+
 func TestWindowPinButtonTogglesBlurHideAndLayout(t *testing.T) {
 	app := &App{}
 	vm := newViewModel(app, engine.Snapshot{

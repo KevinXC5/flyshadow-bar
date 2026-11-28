@@ -51,6 +51,7 @@ type App struct {
 
 	quitting       bool
 	pinWindow      bool // 置顶窗口：开启后失焦不自动收起（--show 启动默认开启，也可由标题栏置顶按钮随时切换）
+	dockVisible    bool // macOS Dock 图标当前是否已展示（独立抓包大窗口打开期间自动显示，关闭后收回）
 	lastBlurHide   time.Time
 	blurGuardUntil time.Time // 系统授权弹窗前后短暂屏蔽失焦自动收起，防止 macOS SecurityAgent 退出时误隐主窗口
 	unsub          func()
@@ -138,10 +139,41 @@ func Run(opts RunOptions) error {
 	log.Printf("[app] 本地控制服务已就绪: addr=%s", ctrlSrv.Addr())
 	app.ctrl = ctrlSrv
 
-	// 再次启动同一二进制时唤醒主窗口
+	// 再次启动同一二进制时唤醒主窗口（若抓包大窗口正打开则优先唤醒抓包窗口）
 	mygo.App.OnSecondInstance(func(_ []string, _ string) {
+		if app.isCaptureWindowVisible() {
+			app.openCaptureWindow("")
+			return
+		}
 		app.showWindow()
 	})
+	// macOS 点击 Dock 图标时：若抓包大窗口处于打开/最小化态则直接还原并置前，否则打开主面板
+	mygo.App.OnActivate(func(_ bool) {
+		if app.captureWin != nil && (app.dockVisible || app.captureWin.IsVisible()) {
+			app.openCaptureWindow("")
+			return
+		}
+		app.showWindow()
+	})
+	if runtime.GOOS == "darwin" {
+		dockMenu := mygo.NewMenu([]*mygo.MenuItem{
+			{
+				ID:    "dock-capture",
+				Label: "显示抓包分析",
+				Click: func(*mygo.MenuItem, *mygo.Window) {
+					mygo.RunOnMain(func() { app.openCaptureWindow("") })
+				},
+			},
+			{
+				ID:    "dock-main",
+				Label: "打开主面板",
+				Click: func(*mygo.MenuItem, *mygo.Window) {
+					mygo.RunOnMain(func() { app.showWindow() })
+				},
+			},
+		})
+		mygo.App.Dock.SetMenu(dockMenu)
+	}
 	// 防止关闭窗口导致托盘常驻应用退出
 	mygo.App.OnWindowAllClosed(func() {})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
@@ -722,15 +754,19 @@ func (a *App) ensureCaptureWindow() {
 		MinHeight:            620,
 		StateKey:             "capture-inspector-v2",
 		Hidden:               true,
+		SkipTaskbar:          false, // 独立大窗口保留 Windows 任务栏图标，方便最小化或被遮挡后一键切回
 		TitleBarStyle:        mygo.TitleBarHidden,
 		TrafficLightPosition: &mygo.Point{X: 16, Y: 18},
 		TitleBarHeight:       48,
 		Content:              ui.View(a.captureVM.render),
 	})
+	if runtime.GOOS == "windows" && len(appLogoPNG) > 0 {
+		_ = a.captureWin.SetIcon(appLogoPNG)
+	}
 	a.captureWin.OnClose(func(e *mygo.CloseEvent) {
 		if !a.quitting {
 			e.PreventDefault()
-			a.captureWin.Hide()
+			a.hideCaptureWindow()
 		}
 	})
 	if a.captureUnsub == nil && a.eng != nil && a.eng.CaptureStore() != nil {
@@ -760,6 +796,10 @@ func (a *App) openCaptureWindow(initialFilter string) {
 	if !a.pinWindow && a.isWindowVisible() {
 		a.hideWindow()
 	}
+	// macOS 打开抓包大窗口时动态展示 Dock 图标（支持 Cmd+Tab 与点击 Dock 恢复）；
+	// Windows 显式确保任务栏图标可见，最小化或切到后台后可随时从任务栏一键切回。
+	a.syncDockPresence(true)
+	a.captureWin.SetSkipTaskbar(false)
 	a.captureWin.Restore()
 	a.captureWin.Show()
 	a.captureWin.Focus()
@@ -770,6 +810,37 @@ func (a *App) openCaptureWindow(initialFilter string) {
 func (a *App) hideCaptureWindow() {
 	if a.captureWin != nil {
 		a.captureWin.Hide()
+	}
+	a.syncDockPresence(false)
+}
+
+func (a *App) isCaptureWindowVisible() bool {
+	return a != nil && a.captureWin != nil && a.captureWin.IsVisible()
+}
+
+// shouldShowDockIcon 判断当前平台是否应根据抓包大窗口的打开状态动态展示 Dock 图标（仅 macOS 生效）。
+func shouldShowDockIcon(goos string, captureOpen bool) bool {
+	return goos == "darwin" && captureOpen
+}
+
+// syncDockPresence 在 macOS 上按抓包大窗口状态动态切换 Dock 图标显示与隐藏：
+// 打开抓包大窗口（含最小化与被其他应用遮挡期间）保持 Dock 图标可见，关闭大窗口后收回以维持轻量菜单栏形态。
+func (a *App) syncDockPresence(captureOpen bool) {
+	if a == nil {
+		return
+	}
+	want := shouldShowDockIcon(runtime.GOOS, captureOpen)
+	if want == a.dockVisible {
+		return
+	}
+	a.dockVisible = want
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	if want {
+		mygo.App.Dock.Show()
+	} else {
+		mygo.App.Dock.Hide()
 	}
 }
 
