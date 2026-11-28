@@ -40,16 +40,21 @@ func (e *Engine) TunStatus() tun.Status {
 //   - 未开抓包时：直达 FlyShadow 核心库，零额外抓包开销；
 //   - 已开抓包时：自动穿透 Go 前置透明抓包代理，实现全机 HTTP / 白名单 HTTPS MITM / UDP 抓包。
 func (e *Engine) SetTunEnabled(enabled bool) error {
+	return e.SetTunEnabledWithAuthHook(enabled, nil)
+}
+
+// SetTunEnabledWithAuthHook 与 SetTunEnabled 相同，但允许调用方传入系统权限授权框关闭后的即时回调。
+func (e *Engine) SetTunEnabledWithAuthHook(enabled bool, onAuthComplete func()) error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
 
 	if enabled {
-		return e.enableTunLocked(true)
+		return e.enableTunLocked(true, onAuthComplete)
 	}
 	return e.disableTunLocked(true)
 }
 
-func (e *Engine) enableTunLocked(persist bool) error {
+func (e *Engine) enableTunLocked(persist bool, onAuthComplete func()) error {
 	e.mu.RLock()
 	if e.tunMgr != nil && e.tunMgr.Status().Active {
 		e.mu.RUnlock()
@@ -106,7 +111,8 @@ func (e *Engine) enableTunLocked(persist bool) error {
 		BypassHosts: func() []string {
 			return e.collectNodeBypassHosts()
 		},
-		OpenDevice: openDev,
+		OpenDevice:     openDev,
+		OnAuthComplete: onAuthComplete,
 		OnFatal: func(ferr error) {
 			e.handleTunFatal(ferr)
 		},

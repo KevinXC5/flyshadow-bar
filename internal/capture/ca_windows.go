@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 )
 
 func platformInstallPromptHint() string {
@@ -34,11 +35,11 @@ func installSystemCATrust(certPath string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
+		msg := sanitizeWindowsCmdOutput(out)
 		if msg != "" {
 			return fmt.Errorf("安装 Windows 根证书失败（若点击了“否”可重试）: %s", msg)
 		}
-		return fmt.Errorf("安装 Windows 根证书失败: %w", err)
+		return fmt.Errorf("安装 Windows 根证书失败（若在系统安全确认弹窗中点击了“否”，请重新点击安装并选择“是”）")
 	}
 	return nil
 }
@@ -52,11 +53,20 @@ func uninstallSystemCATrust(_, _, sha1FP string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
+		msg := sanitizeWindowsCmdOutput(out)
 		if msg != "" {
 			return fmt.Errorf("卸载 Windows 根证书失败: %s", msg)
 		}
 		return fmt.Errorf("卸载 Windows 根证书失败: %w", err)
 	}
 	return nil
+}
+
+// sanitizeWindowsCmdOutput 避免中文 Windows 下 certutil 输出 GBK 非 UTF-8 字节直接显示为乱码。
+func sanitizeWindowsCmdOutput(raw []byte) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || !utf8.ValidString(s) {
+		return ""
+	}
+	return s
 }

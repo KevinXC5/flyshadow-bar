@@ -27,6 +27,7 @@ type RunOptions struct {
 	CoreLibPath         string
 	StartHidden         bool
 	ShowOnceOnStart     bool
+	EnableTunOnStart    bool
 	NoConnect           bool
 	DisableAutoSysProxy bool
 }
@@ -48,10 +49,11 @@ type App struct {
 
 	updateProgressReset func()
 
-	quitting     bool
-	pinWindow    bool // 置顶窗口：开启后失焦不自动收起（--show 启动默认开启，也可由标题栏置顶按钮随时切换）
-	lastBlurHide time.Time
-	unsub        func()
+	quitting       bool
+	pinWindow      bool // 置顶窗口：开启后失焦不自动收起（--show 启动默认开启，也可由标题栏置顶按钮随时切换）
+	lastBlurHide   time.Time
+	blurGuardUntil time.Time // 系统授权弹窗前后短暂屏蔽失焦自动收起，防止 macOS SecurityAgent 退出时误隐主窗口
+	unsub          func()
 	stopCh       chan struct{}
 	closeOnce    sync.Once
 }
@@ -213,6 +215,11 @@ func (a *App) onReady(opts RunOptions) {
 		if err := a.eng.Start(!opts.NoConnect); err != nil {
 			log.Printf("启动引擎失败: %v", err)
 		}
+		if opts.EnableTunOnStart && !a.eng.Snapshot().TunActive {
+			if err := a.eng.SetTunEnabled(true); err != nil {
+				log.Printf("[tun] 提权重启后自动开启 TUN 失败: %v", err)
+			}
+		}
 	}()
 
 	// 仅在窗口打开且位于「连接」页时按需轮询活跃连接，平时零额外开销
@@ -314,9 +321,9 @@ func (a *App) ensureWindow() {
 			a.refreshTrayMenu()
 		}
 	})
-	// 托盘弹窗体验：点击面板外部自动收起（已置顶、更新下载中或模态弹窗打开时保留不收起）
+	// 托盘弹窗体验：点击面板外部自动收起（已置顶、更新下载中、系统授权保护期或模态弹窗打开时保留不收起）
 	a.win.OnBlur(func() {
-		if !shouldHideOnBlur(a.quitting, a.pinWindow, a.win != nil && a.win.IsVisible(), a.vm) {
+		if !shouldHideOnBlurAt(a.quitting, a.pinWindow, a.win != nil && a.win.IsVisible(), a.vm, a.blurGuardUntil, time.Now()) {
 			return
 		}
 		if a.vm != nil {
@@ -475,13 +482,33 @@ func (a *App) hideWindow() {
 
 // shouldHideOnBlur 判断主窗口失焦时是否应自动收起（所有主标签页均一致自动收起，仅置顶窗口、更新下载中或模态弹窗打开时保持可见）。
 func shouldHideOnBlur(quitting, pinWindow, visible bool, vm *viewModel) bool {
+	return shouldHideOnBlurAt(quitting, pinWindow, visible, vm, time.Time{}, time.Now())
+}
+
+// shouldHideOnBlurAt 在 shouldHideOnBlur 基础上增加系统授权前后的短暂失焦保护期判断，
+// 防止 macOS 管理员密码 / 钥匙串认证弹窗关闭瞬间异步投递的失焦事件误把主窗口收起。
+func shouldHideOnBlurAt(quitting, pinWindow, visible bool, vm *viewModel, blurGuardUntil, now time.Time) bool {
 	if quitting || pinWindow || !visible {
+		return false
+	}
+	if !blurGuardUntil.IsZero() && now.Before(blurGuardUntil) {
 		return false
 	}
 	if vm != nil && (vm.updateDownloading || vm.subModalOpen || vm.subSaving || vm.activeRulesModal.open || vm.tunModalOpen || vm.tunBusy || vm.snap.TunStarting) {
 		return false
 	}
 	return true
+}
+
+// guardBlurFor 在主线程延长主窗口失焦保护截止时间，避免系统授权框切换焦点时误触发自动收起。
+func (a *App) guardBlurFor(d time.Duration) {
+	if a == nil || d <= 0 {
+		return
+	}
+	until := time.Now().Add(d)
+	if until.After(a.blurGuardUntil) {
+		a.blurGuardUntil = until
+	}
 }
 
 func (a *App) toggleWindow() {
@@ -746,15 +773,48 @@ func (a *App) hideCaptureWindow() {
 	}
 }
 
+// restoreWindowAfterAuth 在系统安全授权弹窗（osascript 管理员认证 / security 钥匙串认证）关闭后，
+// 立即将发起授权的窗口拉回前台聚焦，并在 160ms 后补做一次前台激活，避免 macOS SecurityAgent
+// 退出时把无 Dock 图标的菜单栏应用切回后台或误隐主窗口。
+func (a *App) restoreWindowAfterAuth(mainWasVisible, captureWasVisible bool) {
+	if a == nil {
+		return
+	}
+	a.guardBlurFor(2 * time.Second)
+	focusNow := func() {
+		if a == nil || a.quitting {
+			return
+		}
+		if captureWasVisible && a.captureWin != nil {
+			a.captureWin.Restore()
+			a.captureWin.Show()
+			a.captureWin.Focus()
+			mygo.App.Focus()
+			a.captureWin.Invalidate()
+			return
+		}
+		if mainWasVisible && a.win != nil {
+			a.win.Restore()
+			a.win.Show()
+			a.win.Focus()
+			mygo.App.Focus()
+			a.win.Invalidate()
+		}
+	}
+	focusNow()
+	if runtime.GOOS == "darwin" {
+		time.AfterFunc(160*time.Millisecond, func() {
+			mygo.RunOnMain(focusNow)
+		})
+	}
+}
+
 // refocusMainWindowIfVisible 在系统安全授权弹窗关闭后将主窗口重新拉回前台聚焦（避免无 Dock 图标的菜单栏应用被系统切到后台）。
 func (a *App) refocusMainWindowIfVisible() {
 	if a == nil || a.win == nil || !a.win.IsVisible() {
 		return
 	}
-	a.win.Show()
-	a.win.Focus()
-	mygo.App.Focus()
-	a.win.Invalidate()
+	a.restoreWindowAfterAuth(true, false)
 }
 
 // refocusCaptureWindowIfVisible 在系统证书/TUN 授权弹窗关闭后将抓包分析大窗口重新拉回前台聚焦。
@@ -762,10 +822,7 @@ func (a *App) refocusCaptureWindowIfVisible() {
 	if a == nil || a.captureWin == nil || !a.captureWin.IsVisible() {
 		return
 	}
-	a.captureWin.Show()
-	a.captureWin.Focus()
-	mygo.App.Focus()
-	a.captureWin.Invalidate()
+	a.restoreWindowAfterAuth(false, true)
 }
 
 func (a *App) updateCaptureWindow(fn func()) {

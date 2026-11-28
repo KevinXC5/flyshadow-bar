@@ -439,3 +439,19 @@ func TestBuildMacHelperLaunchCmdAvoidsNohup(t *testing.T) {
 		t.Fatalf("unexpected macOS helper launch cmd: %s", cmd)
 	}
 }
+
+func TestCaptureHelperLogAndRunCmdTimeout(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "helper.log")
+	if err := os.WriteFile(logPath, []byte("line1\n[tun-helper] openNativeUTUN ok\n[tun-helper] ifconfig utun8 up ok\n"), 0o600); err != nil {
+		t.Fatalf("write helper.log: %v", err)
+	}
+	summary := captureHelperLog(logPath, "unit-test")
+	if !strings.Contains(summary, "openNativeUTUN ok") || !strings.Contains(summary, "ifconfig utun8 up ok") {
+		t.Fatalf("unexpected captureHelperLog summary: %q", summary)
+	}
+
+	_, err := runCmdWithTimeout(120*time.Millisecond, "/bin/sleep", "2")
+	if err == nil || !strings.Contains(err.Error(), "命令执行超时") {
+		t.Fatalf("expected timeout error from runCmdWithTimeout, got %v", err)
+	}
+}

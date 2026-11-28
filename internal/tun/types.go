@@ -40,15 +40,17 @@ type Status struct {
 
 // DeviceConfig 定义底层平台虚拟网卡与路由的启动参数。
 type DeviceConfig struct {
-	TunIP            string
-	PrefixLen        int
-	MTU              int
-	TakeoverCIDRs    []string
-	BypassCIDRs      []string
-	BypassIPs        []string
-	ScopedTestMode   bool
-	AdapterName      string
-	WinTunDLLPath    string
+	TunIP          string
+	PrefixLen      int
+	MTU            int
+	TakeoverCIDRs  []string
+	BypassCIDRs    []string
+	BypassIPs      []string
+	ScopedTestMode bool
+	AdapterName    string
+	WinTunDLLPath  string
+	// OnAuthComplete 在系统权限授权弹窗结束（确认或取消）后第一时间触发，便于桌面 UI 立即恢复窗口前台聚焦。
+	OnAuthComplete func()
 }
 
 // PacketDevice 抽象跨平台 L3 IP 虚拟网卡设备（macOS utun / Windows Wintun / 单测内存设备）。
@@ -75,6 +77,8 @@ type Options struct {
 	WinTunDLLPath    string
 	// OpenDevice 仅用于单元测试或自定义虚拟设备注入；为空时走平台原生驱动。
 	OpenDevice func(cfg DeviceConfig) (PacketDevice, error)
+	// OnAuthComplete 在系统管理员授权框关闭后第一时间回调（早于虚拟网卡与路由配置完成）。
+	OnAuthComplete func()
 	// OnFatal 在底层虚拟网卡或提权辅助进程意外断开时异步回调。
 	OnFatal func(err error)
 }

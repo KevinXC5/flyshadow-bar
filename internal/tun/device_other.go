@@ -2,6 +2,8 @@
 
 package tun
 
+import "time"
+
 // IsAdmin 在非 macOS/Windows 平台返回 false。
 func IsAdmin() bool {
 	return false
@@ -16,6 +18,9 @@ func NeedsElevationRestart() bool {
 func RelaunchAsAdmin() error {
 	return ErrUnsupported
 }
+
+// WaitForProcessExit 其他平台空实现。
+func WaitForProcessExit(int, time.Duration) {}
 
 // RunMacHelper 仅在 macOS 上支持。
 func RunMacHelper([]string) error {

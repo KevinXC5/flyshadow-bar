@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -48,6 +49,8 @@ func NeedsElevationRestart() bool {
 }
 
 // RelaunchAsAdmin 使用 ShellExecuteW("runas") 弹出 UAC 框以管理员权限重新启动当前应用。
+// 传入 --wait-pid 与 --relaunch，确保新进程等待旧进程释放单实例互斥锁后再平滑接管窗口，
+// 避免双实例竞态闪退；同时传入 --enable-tun 让提权重启后自动开启 TUN 无需二次点击。
 func RelaunchAsAdmin() error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -55,7 +58,8 @@ func RelaunchAsAdmin() error {
 	}
 	verb, _ := windows.UTF16PtrFromString("runas")
 	file, _ := windows.UTF16PtrFromString(exe)
-	params, _ := windows.UTF16PtrFromString("--show")
+	argStr := fmt.Sprintf("--relaunch --wait-pid=%d --enable-tun", os.Getpid())
+	params, _ := windows.UTF16PtrFromString(argStr)
 	r, _, callErr := procShellExecW.Call(
 		0,
 		uintptr(unsafe.Pointer(verb)),
@@ -71,6 +75,23 @@ func RelaunchAsAdmin() error {
 		return errors.New("用户取消或拒绝了 Windows UAC 管理员授权")
 	}
 	return nil
+}
+
+// WaitForProcessExit 等待指定 PID 退出（最多等待 timeout），用于提权重启前等待旧进程释放单实例锁。
+func WaitForProcessExit(pid int, timeout time.Duration) {
+	if pid <= 0 {
+		return
+	}
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(h)
+	ms := uint32(timeout / time.Millisecond)
+	if ms == 0 {
+		ms = 5000
+	}
+	_, _ = windows.WaitForSingleObject(h, ms)
 }
 
 // RunMacHelper 仅在 macOS 上使用。
@@ -280,25 +301,39 @@ func (d *windowsTunDevice) applyRoutes(cfg DeviceConfig) error {
 	d.outboundIdx = outIdx
 	d.outboundIface = outName
 
-	// 1. 配置 Wintun 虚拟网卡 IPv4 地址、子网掩码与 MTU
+	// 1. 配置 Wintun 虚拟网卡 IPv4 地址、子网掩码与 MTU（刚创建适配器后 NDIS 可能需要数百毫秒就绪，带短重试）
 	_, mask, _, err := CIDRToNetworkMask(fmt.Sprintf("%s/%d", cfg.TunIP, cfg.PrefixLen))
 	if err != nil {
 		return err
 	}
-	if out, err := runHiddenCmd("netsh", "interface", "ipv4", "set", "address",
-		fmt.Sprintf("name=%d", d.ifIndex), "source=static",
-		fmt.Sprintf("address=%s", cfg.TunIP), fmt.Sprintf("mask=%s", mask)); err != nil {
-		return fmt.Errorf("配置 Wintun IPv4 地址失败: %v (%s)", err, out)
+	var netshOut string
+	var netshErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		netshOut, netshErr = runHiddenCmd("netsh", "interface", "ipv4", "set", "address",
+			fmt.Sprintf("name=%d", d.ifIndex), "source=static",
+			fmt.Sprintf("address=%s", cfg.TunIP), fmt.Sprintf("mask=%s", mask))
+		if netshErr == nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if netshErr != nil {
+		return fmt.Errorf("配置 Wintun IPv4 地址失败: %v (%s)", netshErr, netshOut)
 	}
 	_, _ = runHiddenCmd("netsh", "interface", "ipv4", "set", "subinterface",
 		fmt.Sprintf("%d", d.ifIndex), fmt.Sprintf("mtu=%d", cfg.MTU), "store=active")
 
-	// 2. 仅在全局模式添加私网、CGNAT 与远程节点豁免路由
+	// 2. 仅在全局模式添加私网、CGNAT 与远程节点豁免路由（跳过已被其他虚拟网卡如 Tailscale 占用的网段）
 	d.routeMu.Lock()
 	defer d.routeMu.Unlock()
 	if !cfg.ScopedTestMode && d.gateway != "" && d.outboundIdx > 0 {
+		existingSpecial := detectWindowsExistingNonPhysicalRoutes(d.outboundIdx, d.ifIndex)
 		for _, cidr := range cfg.BypassCIDRs {
 			if netAddr, netMask, _, cerr := CIDRToNetworkMask(cidr); cerr == nil {
+				if _, protected := existingSpecial[netAddr+"/"+netMask]; protected {
+					log.Printf("[tun] 保留 Windows 现有隧道路由 %s（避免覆盖其他 VPN 虚拟网卡）", cidr)
+					continue
+				}
 				d.addWinRouteLocked(netAddr, netMask, d.gateway, d.outboundIdx, 5)
 			}
 		}
@@ -307,14 +342,26 @@ func (d *windowsTunDevice) applyRoutes(cfg DeviceConfig) error {
 		}
 	}
 
-	// 3. 添加分片接管路由到 Wintun 接口（保留原 0.0.0.0 默认路由）
-	for _, cidr := range cfg.TakeoverCIDRs {
+	// 3. 添加分片接管路由到 Wintun 接口（保留原 0.0.0.0 默认路由；首条路由带重试等待接口 IP 完全激活）
+	for i, cidr := range cfg.TakeoverCIDRs {
 		netAddr, netMask, _, cerr := CIDRToNetworkMask(cidr)
 		if cerr != nil {
 			continue
 		}
-		if err := d.addWinRouteStrictLocked(netAddr, netMask, "0.0.0.0", d.ifIndex, 5); err != nil {
-			return fmt.Errorf("添加 Windows TUN 路由 %s 失败: %w", cidr, err)
+		var rerr error
+		retries := 1
+		if i == 0 {
+			retries = 8
+		}
+		for attempt := 0; attempt < retries; attempt++ {
+			rerr = d.addWinRouteStrictLocked(netAddr, netMask, "0.0.0.0", d.ifIndex, 5)
+			if rerr == nil {
+				break
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		if rerr != nil {
+			return fmt.Errorf("添加 Windows TUN 路由 %s 失败: %w", cidr, rerr)
 		}
 	}
 	return nil
@@ -508,4 +555,46 @@ func runHiddenCmd(name string, args ...string) (string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// detectWindowsExistingNonPhysicalRoutes 扫描当前 IPv4 路由表，识别已被非默认物理网卡（如 Tailscale/ZeroTier）
+// 占用的网段（返回 "network/mask" 集合），避免 TUN 豁免路由误覆写已有远程隧道。
+func detectWindowsExistingNonPhysicalRoutes(physicalIfIdx, tunIfIdx uint32) map[string]struct{} {
+	res := make(map[string]struct{})
+	out, err := runHiddenCmd("route", "print", "-4")
+	if err != nil {
+		return res
+	}
+	physIPs := make(map[string]struct{})
+	if ifaces, ierr := net.Interfaces(); ierr == nil {
+		for _, ifc := range ifaces {
+			if uint32(ifc.Index) != physicalIfIdx && uint32(ifc.Index) != tunIfIdx {
+				continue
+			}
+			if addrs, aerr := ifc.Addrs(); aerr == nil {
+				for _, a := range addrs {
+					if ipNet, ok := a.(*net.IPNet); ok {
+						if v4 := ipNet.IP.To4(); v4 != nil {
+							physIPs[v4.String()] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		netAddr, netMask, localIP := fields[0], fields[1], fields[3]
+		if net.ParseIP(netAddr).To4() == nil || net.ParseIP(netMask).To4() == nil || netAddr == "0.0.0.0" {
+			continue
+		}
+		if _, isPhys := physIPs[localIP]; isPhys || localIP == "127.0.0.1" {
+			continue
+		}
+		res[netAddr+"/"+netMask] = struct{}{}
+	}
+	return res
 }

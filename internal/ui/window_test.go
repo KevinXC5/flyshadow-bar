@@ -464,6 +464,15 @@ func TestShouldHideOnBlurAcrossAllTabs(t *testing.T) {
 	if shouldHideOnBlur(false, true, true, vm) {
 		t.Fatalf("pinWindow should prevent hide on blur")
 	}
+
+	// 系统授权前后处于 blurGuardUntil 保护期内时，即使模态弹窗已关闭也不应误隐主窗口；保护期过期后恢复自动收起
+	now := time.Now()
+	if shouldHideOnBlurAt(false, false, true, vm, now.Add(2*time.Second), now) {
+		t.Fatalf("blurGuardUntil active should prevent hide on blur")
+	}
+	if !shouldHideOnBlurAt(false, false, true, vm, now.Add(-100*time.Millisecond), now) {
+		t.Fatalf("expired blurGuardUntil should restore hide on blur")
+	}
 }
 
 func TestWindowPinButtonTogglesBlurHideAndLayout(t *testing.T) {

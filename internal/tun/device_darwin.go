@@ -4,6 +4,7 @@ package tun
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -66,6 +67,9 @@ func RelaunchAsAdmin() error {
 	return nil
 }
 
+// WaitForProcessExit 等待旧进程退出（macOS 无需提权重启，留空实现以保持跨平台签名一致）。
+func WaitForProcessExit(int, time.Duration) {}
+
 // openPlatformDevice 在 macOS 上打开 utun 虚拟网卡并应用安全路由：
 // - 若当前已具备 root 权限，直接本地打开 utun；
 // - 若为普通桌面用户，则通过原生管理员授权弹窗启动内置 `fsbar tun-helper` 提权子进程，
@@ -91,10 +95,12 @@ type directDarwinDevice struct {
 }
 
 func openDirectDarwinDevice(cfg DeviceConfig) (*directDarwinDevice, error) {
+	t0 := time.Now()
 	fd, name, err := openNativeUTUN()
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("[tun-helper] openNativeUTUN ok: dev=%s (%v)", name, time.Since(t0).Round(time.Millisecond))
 
 	rm := newMacRouteManager()
 	if err := rm.Apply(name, cfg); err != nil {
@@ -102,6 +108,8 @@ func openDirectDarwinDevice(cfg DeviceConfig) (*directDarwinDevice, error) {
 		rm.Rollback()
 		return nil, err
 	}
+	log.Printf("[tun-helper] routes applied: dev=%s out=%s gw=%s count=%d (%v)",
+		name, rm.outboundIface, rm.gateway, rm.Count(), time.Since(t0).Round(time.Millisecond))
 
 	return &directDarwinDevice{
 		fd:     fd,
@@ -272,6 +280,7 @@ func (m *macRouteManager) Apply(utunName string, cfg DeviceConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	t0 := time.Now()
 	m.utunName = utunName
 	iface, gw, err := detectMacPhysicalDefaultRoute()
 	if err != nil && !cfg.ScopedTestMode {
@@ -279,15 +288,17 @@ func (m *macRouteManager) Apply(utunName string, cfg DeviceConfig) error {
 	}
 	m.outboundIface = iface
 	m.gateway = gw
+	log.Printf("[tun-helper] detectDefaultRoute ok: iface=%s gw=%s (%v)", iface, gw, time.Since(t0).Round(time.Millisecond))
 
 	// 1. 启用 utun 虚拟网卡并配置 IP 与 MTU
 	if out, err := runCmd("/sbin/ifconfig", utunName, "inet", cfg.TunIP, cfg.TunIP, "mtu", fmt.Sprintf("%d", cfg.MTU), "up"); err != nil {
 		return fmt.Errorf("配置 %s 接口失败: %v (%s)", utunName, err, out)
 	}
+	log.Printf("[tun-helper] ifconfig %s up ok (%v)", utunName, time.Since(t0).Round(time.Millisecond))
 
 	// 2. 虚拟网卡自身网段路由（198.18.0.0/16 -> utunX）
 	if _, ipNet, err := net.ParseCIDR(fmt.Sprintf("%s/%d", cfg.TunIP, cfg.PrefixLen)); err == nil {
-		m.addIfaceRouteLocked(ipNet.String(), utunName)
+		_ = m.addIfaceRouteLocked(ipNet.String(), utunName)
 	}
 
 	// 3. 仅在全局模式添加私网与节点豁免路由（绝不覆盖已有非物理网卡路由如 Tailscale 100.64/10）
@@ -301,8 +312,9 @@ func (m *macRouteManager) Apply(utunName string, cfg DeviceConfig) error {
 			m.addGatewayNetRouteLocked(cidr, gw)
 		}
 		for _, ip := range cfg.BypassIPs {
-			m.addBypassIPLocked(ip)
+			_ = m.addBypassIPLocked(ip)
 		}
+		log.Printf("[tun-helper] bypass routes done: cidrs=%d ips=%d (%v)", len(cfg.BypassCIDRs), len(cfg.BypassIPs), time.Since(t0).Round(time.Millisecond))
 	}
 
 	// 4. 添加接管网段路由（非破坏性分片，绝不删除系统原有 default 路由）
@@ -495,10 +507,43 @@ func normalizeNetstatCIDR(dst string) string {
 	return ""
 }
 
+const macRouteCmdTimeout = 5 * time.Second
+
 func runCmd(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	return runCmdWithTimeout(macRouteCmdTimeout, name, args...)
+}
+
+func runCmdWithTimeout(timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return strings.TrimSpace(string(out)), fmt.Errorf("命令执行超时(%s %s): %w", name, strings.Join(args, " "), ctx.Err())
+	}
 	return strings.TrimSpace(string(out)), err
+}
+
+// captureHelperLog 在清理临时目录前读取 tun-helper 诊断日志写入主日志，并返回末尾摘要便于定位异常。
+func captureHelperLog(logFile, stage string) string {
+	raw, err := os.ReadFile(logFile)
+	if err != nil {
+		return ""
+	}
+	full := strings.TrimSpace(string(raw))
+	if full == "" {
+		return ""
+	}
+	log.Printf("[tun] tun-helper 诊断日志 (%s):\n%s", stage, full)
+	lines := strings.Split(full, "\n")
+	tail := make([]string, 0, 2)
+	for i := len(lines) - 1; i >= 0 && len(tail) < 2; i-- {
+		s := strings.TrimSpace(lines[i])
+		if s != "" {
+			tail = append([]string{s}, tail...)
+		}
+	}
+	return strings.Join(tail, " | ")
 }
 
 // ---------- 非 root 桌面态：通过原生授权弹窗启动内置 fsbar tun-helper ----------
@@ -589,6 +634,10 @@ func openHelperDarwinDevice(cfg DeviceConfig) (PacketDevice, error) {
 
 	osaCmd := exec.Command("/usr/bin/osascript", "-e", appleScript)
 	osaOut, osaErr := osaCmd.CombinedOutput()
+	// 授权框一经关闭（无论确认还是取消）立即回调 UI 恢复窗口前台聚焦，不等后续网卡与路由配置完成
+	if cfg.OnAuthComplete != nil {
+		cfg.OnAuthComplete()
+	}
 	if osaErr != nil {
 		_ = ln.Close()
 		_ = os.RemoveAll(sockDir)
@@ -609,9 +658,8 @@ func openHelperDarwinDevice(cfg DeviceConfig) (PacketDevice, error) {
 		if res.err == nil && res.conn != nil {
 			break
 		}
-		helperLog, _ := os.ReadFile(logFile)
+		detail := captureHelperLog(logFile, "accept-timeout")
 		_ = os.RemoveAll(sockDir)
-		detail := strings.TrimSpace(string(helperLog))
 		if detail != "" {
 			return nil, fmt.Errorf("等待 TUN 辅助服务连接超时: %s", detail)
 		}
@@ -619,54 +667,69 @@ func openHelperDarwinDevice(cfg DeviceConfig) (PacketDevice, error) {
 	}
 	_ = ln.Close()
 	if res.err != nil {
-		helperLog, _ := os.ReadFile(logFile)
+		detail := captureHelperLog(logFile, "accept-error")
 		_ = os.RemoveAll(sockDir)
-		return nil, fmt.Errorf("等待 TUN 辅助服务连接失败: %v %s", res.err, strings.TrimSpace(string(helperLog)))
+		return nil, fmt.Errorf("等待 TUN 辅助服务连接失败: %v %s", res.err, detail)
 	}
 	conn := res.conn
 
-	// 校验 helper 认证与就绪消息
-	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	// 1. 校验 helper 认证帧（独立 8 秒超时）
+	_ = conn.SetReadDeadline(time.Now().Add(8 * time.Second))
 	typ, payload, err := readHelperFrame(conn, nil)
 	if err != nil {
+		detail := captureHelperLog(logFile, "hello-read-error")
 		_ = conn.Close()
 		_ = os.RemoveAll(sockDir)
+		if detail != "" {
+			return nil, fmt.Errorf("读取 TUN 辅助服务握手失败: %w（%s）", err, detail)
+		}
 		return nil, fmt.Errorf("读取 TUN 辅助服务握手失败: %w", err)
 	}
 	if typ == helperFrameError {
 		var em helperErrorMsg
 		_ = json.Unmarshal(payload, &em)
+		_ = captureHelperLog(logFile, "hello-frame-error")
 		_ = conn.Close()
 		_ = os.RemoveAll(sockDir)
 		return nil, fmt.Errorf("TUN 辅助服务启动失败: %s", em.Error)
 	}
 	if typ != helperFrameHello {
+		_ = captureHelperLog(logFile, "hello-unexpected")
 		_ = conn.Close()
 		_ = os.RemoveAll(sockDir)
 		return nil, errors.New("TUN 辅助服务握手协议异常")
 	}
 	var hello helperHelloMsg
 	if err := json.Unmarshal(payload, &hello); err != nil || hello.Token != token {
+		_ = captureHelperLog(logFile, "hello-token-mismatch")
 		_ = conn.Close()
 		_ = os.RemoveAll(sockDir)
 		return nil, errors.New("TUN 辅助服务身份令牌校验失败")
 	}
 
+	// 2. 等待 utun 创建与路由应用完成（独立 20 秒超时，失败前先采集 helper.log 以便精确诊断）
+	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
 	typ, payload, err = readHelperFrame(conn, nil)
 	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
+		detail := captureHelperLog(logFile, "ready-read-error")
 		_ = conn.Close()
 		_ = os.RemoveAll(sockDir)
+		if detail != "" {
+			return nil, fmt.Errorf("等待 TUN 设备就绪失败: %w（%s）", err, detail)
+		}
 		return nil, fmt.Errorf("等待 TUN 设备就绪失败: %w", err)
 	}
 	if typ == helperFrameError {
 		var em helperErrorMsg
 		_ = json.Unmarshal(payload, &em)
+		_ = captureHelperLog(logFile, "ready-frame-error")
 		_ = conn.Close()
 		_ = os.RemoveAll(sockDir)
 		return nil, fmt.Errorf("创建虚拟网卡失败: %s", em.Error)
 	}
 	if typ != helperFrameReady {
+		_ = captureHelperLog(logFile, "ready-unexpected")
 		_ = conn.Close()
 		_ = os.RemoveAll(sockDir)
 		return nil, errors.New("TUN 辅助服务返回未知就绪帧")
@@ -803,9 +866,12 @@ func buildMacHelperLaunchCmd(exePath string, helperArgs []string, logFile string
 // 负责以 root 权限打开 utun、配置安全路由、通过 Unix Socket 双向转发原始 IPv4 包，
 // 并在收到停止命令、Socket 断开、信号退出或父进程死亡时 500ms 内自动回滚全部路由。
 func RunMacHelper(args []string) error {
-	// 忽略 SIGHUP 并尝试创建独立会话，防止 osascript 授权子 shell 退出时误杀刚拉起的辅助进程
-	signal.Ignore(syscall.SIGHUP)
-	_, _ = syscall.Setsid()
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	// 忽略 SIGHUP 与终端作业控制停止信号，并尝试创建独立会话，防止 osascript 授权子 shell 退出时误杀或挂起辅助进程
+	signal.Ignore(syscall.SIGHUP, syscall.SIGTSTP, syscall.SIGTTIN, syscall.SIGTTOU)
+	sid, sidErr := syscall.Setsid()
+	log.Printf("[tun-helper] start pid=%d ppid=%d euid=%d sid=%d sidErr=%v",
+		os.Getpid(), os.Getppid(), os.Geteuid(), sid, sidErr)
 
 	fs := flag.NewFlagSet("tun-helper", flag.ContinueOnError)
 	sockPath := fs.String("sock", "", "Unix socket path")
@@ -831,6 +897,7 @@ func RunMacHelper(args []string) error {
 		return fmt.Errorf("连接主进程 Unix Socket 失败: %w", err)
 	}
 	defer conn.Close()
+	log.Printf("[tun-helper] dial unix socket ok")
 
 	var writeMu sync.Mutex
 	sendFrame := func(typ byte, data []byte) error {
@@ -847,6 +914,7 @@ func RunMacHelper(args []string) error {
 	if err := sendJSON(helperFrameHello, helperHelloMsg{Token: *token}); err != nil {
 		return err
 	}
+	log.Printf("[tun-helper] hello sent")
 
 	takeoverCIDRs := ParseCIDRList(*routesRaw)
 	if len(takeoverCIDRs) == 0 {
@@ -865,6 +933,8 @@ func RunMacHelper(args []string) error {
 		}
 	}
 
+	log.Printf("[tun-helper] opening utun: takeover=%d bypassCIDRs=%d bypassIPs=%d scoped=%v",
+		len(takeoverCIDRs), len(bypassCIDRs), len(bypassIPs), *scoped)
 	dev, err := openDirectDarwinDevice(DeviceConfig{
 		TunIP:          *tunIP,
 		PrefixLen:      DefaultTunPrefix,
@@ -875,6 +945,7 @@ func RunMacHelper(args []string) error {
 		ScopedTestMode: *scoped,
 	})
 	if err != nil {
+		log.Printf("[tun-helper] openDirectDarwinDevice failed: %v", err)
 		_ = sendJSON(helperFrameError, helperErrorMsg{Error: err.Error()})
 		return err
 	}
@@ -889,6 +960,7 @@ func RunMacHelper(args []string) error {
 	}); err != nil {
 		return err
 	}
+	log.Printf("[tun-helper] ready sent: dev=%s routes=%d", dev.Name(), dev.RouteCount())
 
 	stopCh := make(chan struct{})
 	var stopOnce sync.Once

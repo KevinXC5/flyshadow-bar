@@ -1,11 +1,14 @@
 package tun
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // DefaultTakeoverCIDRs 返回非破坏性 IPv4 分片接管网段（不覆盖或删除原 default 路由，
@@ -93,8 +96,10 @@ func ResolveTakeoverCIDRs(custom []string) (cidrs []string, scoped bool) {
 	return DefaultTakeoverCIDRs(), false
 }
 
-// ResolveBypassIPv4s 将节点域名或 IP 列表解析为需要直走物理网关的公网 IPv4 地址集合。
+// ResolveBypassIPv4s 将节点域名或 IP 列表并发解析为需要直走物理网关的公网 IPv4 地址集合，
+// 并设置短超时避免个别不可达节点域名拖慢 TUN 开启前的授权弹出速度。
 func ResolveBypassIPv4s(hosts []string) []string {
+	var mu sync.Mutex
 	seen := make(map[string]struct{})
 	addIP := func(ip net.IP) {
 		v4 := ip.To4()
@@ -104,9 +109,13 @@ func ResolveBypassIPv4s(hosts []string) []string {
 		if v4.IsLoopback() || v4.IsPrivate() || v4.IsLinkLocalUnicast() || v4.IsMulticast() || v4.IsUnspecified() {
 			return
 		}
+		mu.Lock()
 		seen[v4.String()] = struct{}{}
+		mu.Unlock()
 	}
 
+	domains := make([]string, 0, len(hosts))
+	domainSeen := make(map[string]struct{}, len(hosts))
 	for _, raw := range hosts {
 		h := strings.TrimSpace(raw)
 		if h == "" {
@@ -120,13 +129,39 @@ func ResolveBypassIPv4s(hosts []string) []string {
 			addIP(ip)
 			continue
 		}
-		ips, err := net.LookupIP(h)
-		if err != nil {
+		key := strings.ToLower(h)
+		if _, dup := domainSeen[key]; dup {
 			continue
 		}
-		for _, ip := range ips {
-			addIP(ip)
+		domainSeen[key] = struct{}{}
+		domains = append(domains, h)
+	}
+
+	if len(domains) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		sem := make(chan struct{}, 8)
+		var wg sync.WaitGroup
+		for _, dom := range domains {
+			wg.Add(1)
+			go func(host string) {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+					return
+				}
+				ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+				if err != nil {
+					return
+				}
+				for _, ip := range ips {
+					addIP(ip)
+				}
+			}(dom)
 		}
+		wg.Wait()
 	}
 
 	out := make([]string, 0, len(seen))

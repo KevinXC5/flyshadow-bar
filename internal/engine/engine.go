@@ -373,7 +373,7 @@ func (e *Engine) Start(autoConnect bool) error {
 		autoTun := e.cfg.TunModelEnable && !e.disableAutoSysProxy && (tun.IsAdmin() || e.tunOpenDevice != nil)
 		e.mu.RUnlock()
 		if autoTun {
-			if err := e.enableTunLocked(false); err != nil {
+			if err := e.enableTunLocked(false, nil); err != nil {
 				log.Printf("[engine] 启动自动开启 TUN 模式失败: %v", err)
 			}
 		}

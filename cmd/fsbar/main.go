@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/KevinXC5/flyshadow-bar/internal/applog"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
@@ -52,12 +53,15 @@ func isGUILaunch(args []string) bool {
 	first := args[0]
 	switch first {
 	case "gui", "--gui", "--hidden", "-hidden", "--show", "-show", "--relaunch", "-relaunch",
+		"--enable-tun", "-enable-tun", "--wait-pid", "-wait-pid",
 		"--no-connect", "-no-connect",
 		"--no-auto-sysproxy", "-no-auto-sysproxy",
 		"--config", "-config", "--core-lib", "-core-lib":
 		return true
 	}
 	return strings.HasPrefix(first, "-psn_") ||
+		strings.HasPrefix(first, "--wait-pid=") ||
+		strings.HasPrefix(first, "-wait-pid=") ||
 		strings.HasPrefix(first, "--config=") ||
 		strings.HasPrefix(first, "-config=") ||
 		strings.HasPrefix(first, "--core-lib=") ||
@@ -74,6 +78,8 @@ func runGUI(args []string) error {
 	hidden := fs.Bool("hidden", true, "静默启动到菜单栏/系统托盘（默认开启）")
 	show := fs.Bool("show", false, "启动时立即弹出主窗口")
 	relaunch := fs.Bool("relaunch", false, "更新重启后弹出一次主窗口（失焦仍自动收起）")
+	waitPID := fs.Int("wait-pid", 0, "等待指定旧进程退出后再初始化单实例锁（Windows 提权重启使用）")
+	enableTun := fs.Bool("enable-tun", false, "启动并连接后自动开启 TUN 虚拟网卡模式")
 	noConnect := fs.Bool("no-connect", false, "启动后不自动连接隧道")
 	noAutoSys := fs.Bool("no-auto-sysproxy", false, "禁用启动连接后自动开启系统代理")
 	if err := fs.Parse(args); err != nil {
@@ -81,6 +87,11 @@ func runGUI(args []string) error {
 			return nil
 		}
 		return err
+	}
+
+	// Windows UAC 提权重启场景：等待旧进程释放单实例锁后再继续初始化 UI
+	if *waitPID > 0 {
+		tun.WaitForProcessExit(*waitPID, 6*time.Second)
 	}
 
 	// 仅在使用默认主目录（未显式传入 --config 且未设置自定义目录环境变量）时，
@@ -116,6 +127,7 @@ func runGUI(args []string) error {
 		CoreLibPath:         *libPath,
 		StartHidden:         startHidden,
 		ShowOnceOnStart:     *relaunch,
+		EnableTunOnStart:    *enableTun,
 		NoConnect:           *noConnect,
 		DisableAutoSysProxy: *noAutoSys,
 	})

@@ -89,6 +89,7 @@ func Start(opts Options) (*Manager, error) {
 		ScopedTestMode: scoped,
 		AdapterName:    "FlyShadow Bar TUN",
 		WinTunDLLPath:  opts.WinTunDLLPath,
+		OnAuthComplete: opts.OnAuthComplete,
 	}
 
 	openFn := opts.OpenDevice

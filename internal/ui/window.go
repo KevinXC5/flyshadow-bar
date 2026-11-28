@@ -920,8 +920,16 @@ func (vm *viewModel) confirmEnableTun() {
 	}
 	vm.tunBusy = true
 	vm.tunModalErr = ""
+	mainWasVisible := vm.app.isWindowVisible()
+	vm.app.guardBlurFor(60 * time.Second)
 	go func() {
-		err := vm.app.eng.SetTunEnabled(true)
+		err := vm.app.eng.SetTunEnabledWithAuthHook(true, func() {
+			mygo.RunOnMain(func() {
+				if vm.app != nil {
+					vm.app.restoreWindowAfterAuth(mainWasVisible, false)
+				}
+			})
+		})
 		vm.app.updateWindow(func() {
 			vm.tunBusy = false
 			if err != nil {
@@ -931,9 +939,9 @@ func (vm *viewModel) confirmEnableTun() {
 				vm.tunModalErr = ""
 				vm.showToast("已开启 TUN 模式")
 			}
-			// macOS 系统授权弹窗关闭后焦点可能被切回其他普通前台应用，主动将本窗口重新拉回前台
+			// macOS 系统授权弹窗关闭后焦点可能被切回其他普通前台应用，主动将本窗口重新拉回前台并延续失焦保护
 			if vm.app != nil {
-				vm.app.refocusMainWindowIfVisible()
+				vm.app.restoreWindowAfterAuth(mainWasVisible, false)
 			}
 		})
 	}()

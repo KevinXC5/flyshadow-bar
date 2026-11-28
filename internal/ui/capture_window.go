@@ -1494,6 +1494,7 @@ func (vm *captureViewModel) toggleTunFromCapture(enable bool) {
 	}
 	vm.tunBusy = true
 	vm.tunModalErr = ""
+	capWasVisible := vm.app.captureWin != nil && vm.app.captureWin.IsVisible()
 	go func() {
 		var err error
 		if enable {
@@ -1504,7 +1505,13 @@ func (vm *captureViewModel) toggleTunFromCapture(enable bool) {
 				}
 			}
 			if err == nil {
-				err = vm.app.eng.SetTunEnabled(true)
+				err = vm.app.eng.SetTunEnabledWithAuthHook(true, func() {
+					mygo.RunOnMain(func() {
+						if vm.app != nil {
+							vm.app.restoreWindowAfterAuth(false, capWasVisible)
+						}
+					})
+				})
 			}
 		} else {
 			err = vm.app.eng.SetTunEnabled(false)
@@ -1527,7 +1534,7 @@ func (vm *captureViewModel) toggleTunFromCapture(enable bool) {
 				}
 			}
 			if vm.app != nil {
-				vm.app.refocusCaptureWindowIfVisible()
+				vm.app.restoreWindowAfterAuth(false, capWasVisible)
 			}
 		})
 	}()
