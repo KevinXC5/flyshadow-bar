@@ -41,6 +41,25 @@
       <sub>系统设置 · 代理端口、网络分流、外观主题与自动更新</sub>
     </td>
   </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <img src="docs/screenshots/capture-http-dark.png" alt="独立宽屏抓包分析主窗口" width="760" />
+      <br />
+      <sub>独立宽屏抓包分析窗口 · 请求流筛选、可折叠 Headers、等宽 JSON 响应体预览与一键复制 cURL</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/capture-cert-modal-dark.png" alt="HTTPS 白名单解密与自签名根证书设置" width="380" />
+      <br />
+      <sub>白名单 HTTPS 解密与自签 CA · 安全须知引导与 macOS/Windows 一键安装信任</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/capture-udp-dark.png" alt="UDP 协议抓包与 Hex 预览" width="380" />
+      <br />
+      <sub>UDP 会话采集 · DNS 问答解析、QUIC 元信息识别与数据报 Hex + ASCII 预览</sub>
+    </td>
+  </tr>
 </table>
 
 ## 资源占用对比（vs 原版 FlyShadow）
@@ -64,6 +83,7 @@
 - **紧凑高容量原生 UI**：浅色 / 深色 / 跟随系统外观自适应；概览区并排内置实时上下行速率折线图与订阅流量卡（流量进度、到期时间、VIP 徽标、一键同步与密码配置）；弹窗按屏幕高度自适应（大屏单屏可见 11+ 节点），支持搜索、收藏、按延迟排序与一键测速。
 - **独立订阅配置与双向云端同步**：支持零配置启动并在订阅卡片弹窗直接填写/更换订阅密码（先云端校验成功再安全落盘，失败不覆盖旧凭据），日常更新节点、流量、到期时间与管理云端自定义规则均无需再打开官方客户端；规则增删改与启停双向同步云端并立即热生效，**无需断开隧道**。
 - **实时连接监控与精准进程识别**：对接核心库 `get_tunnel_mapper_info_json` 与 `close_connect`，macOS 下自动批量反查连向本地代理的真实客户端进程（避免误标为代理自身），查看目标域名、进程名、路由结果与实时流量，并可一键加为直连/代理规则、踢掉旧连接即刻生效。
+- **独立宽屏抓包分析与白名单 HTTPS 解密**：在弹窗标题栏、连接页与托盘菜单均可一键打开独立可缩放的宽屏「抓包分析」窗口（平时关闭抓包时核心库直连监听零开销，开启后无缝由 Go 前置混合代理接管并在关闭时自动还原）。支持明文 HTTP 与白名单 HTTPS MITM 展开查看 `概览`、`Query`、可折叠 `Headers`、自动解压与等宽美化 JSON/Hex `Body` 及一键复制 `cURL`；非白名单 HTTPS 默认加密透传并无侵入嗅探 TLS 版本、SNI 与 ALPN；UDP 支持 DNS 问答解析、QUIC Initial 元信息、STUN/NTP 识别与数据报 Hex 预览。内建本机专属自签名 Root CA（绝不上传私钥、抓包仅存内存不落盘），提供安全须知说明与 macOS / Windows 一键安装信任和卸载清理。
 - **单二进制内置 CLI（自动链接 PATH）**：无参数运行即启动常驻 GUI；安装运行后自动将命令行工具 `fsbar` 链接/注册到系统 `PATH` 目录（macOS 自动软链至 `/usr/local/bin`、`/opt/homebrew/bin` 或 `~/.local/bin`，Windows 安装器与运行时自动生成 `fsbar.cmd` 并写入用户 `PATH`），支持终端与 SSH 远程运维，全部命令支持 `--json` 输出。
 - **跨平台系统代理与安全退出**：支持 macOS / Windows 系统代理一键开关、启动连上后自动开启（同步 `autoSetSysProxyOnStartUp`），退出时自动关闭系统代理并安全断开隧道。
 - **无损配置写回与独立数据目录**：默认使用独立程序主目录 `~/.flyshadowbar`（Windows 为 `%USERPROFILE%\.flyshadowbar`），不与原版 `~/.FlyShadow` 混写；首次运行或升级时若存在旧配置则自动无损复制迁移，按 `map[string]json.RawMessage` 原子写回 `config.json`，完整保留账号 token、订阅密码等所有原生字段；界面偏好与滚动程序日志独立保存在同一目录下。
@@ -93,6 +113,7 @@ FlyShadow Bar 使用独立主目录保存配置、界面偏好、运行态文件
 - `flyshadow-bar.run.json`：运行时本地控制发现文件（权限 `0600`，退出自动清理）。
 - `logs/flyshadow-bar.log`：自动滚动程序日志（单文件上限 5 MiB，保留 3 份历史归档，可在「设置 → 关于与更新」一键打开目录或运行 `fsbar logs` 查看）。
 - `cache/`：从官方 JAR 解压的核心动态库与 GeoIP 缓存。
+- `mitm/`：开启白名单 HTTPS 解密时在本机随机生成的专属自签名根证书与私钥（仅本机可读，不上传云端）。
 
 ### 原生核心库
 

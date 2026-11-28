@@ -102,18 +102,34 @@ func (vm *viewModel) renderConnectionsView(c *ui.Context, p palette) {
 			if renderSegmented(c.Key("proc-scope-seg"), p, &scopeIdx, "仅代理", "全部").Changed() {
 				vm.procOnlyProxy = scopeIdx == 0
 			}
-		} else if len(vm.connections) > 0 {
-			proxyCnt, directCnt := 0, 0
-			for _, conn := range vm.connections {
-				switch strings.ToLower(strings.TrimSpace(conn.ProxyType)) {
-				case "direct", "0":
-					directCnt++
-				case "reject", "1":
-				default:
-					proxyCnt++
+		} else {
+			if len(vm.connections) > 0 {
+				proxyCnt, directCnt := 0, 0
+				for _, conn := range vm.connections {
+					switch strings.ToLower(strings.TrimSpace(conn.ProxyType)) {
+					case "direct", "0":
+						directCnt++
+					case "reject", "1":
+					default:
+						proxyCnt++
+					}
 				}
+				ui.Text(c, fmt.Sprintf("代理 %d · 直连 %d", proxyCnt, directCnt)).FontSize(10.5).TextColor(p.textMuted).NoWrap()
 			}
-			ui.Text(c, fmt.Sprintf("代理 %d · 直连 %d", proxyCnt, directCnt)).FontSize(10.5).TextColor(p.textMuted).NoWrap()
+			capBtn := ui.Row(c.Key("btn-open-capture")).Padding(3, 8).Radius(7).
+				Background(p.accentSoft).Border(1, p.borderStrong).AlignItems(ui.Center).Gap(4).
+				Cursor(ui.CursorPointer).Label("打开抓包分析窗口").Tooltip("在独立宽屏窗口中抓包查看 HTTP(S) 请求详情与 UDP 数据")
+			if capBtn.Hovered() {
+				capBtn.Opacity(0.9)
+			}
+			capBtn.Children(func() {
+				ui.Icon(c, svgActivity).Size(11.5, 11.5).TextColor(p.accent)
+				ui.Text(c, "抓包分析").FontSize(10.5).Bold().TextColor(p.accent).NoWrap()
+				ui.Icon(c, svgExternal).Size(10, 10).TextColor(p.accent)
+			})
+			if capBtn.Clicked() && vm.app != nil {
+				vm.app.openCaptureWindow(vm.connSearchQuery)
+			}
 		}
 	})
 
@@ -596,8 +612,10 @@ func (vm *viewModel) renderConnectionRow(c *ui.Context, p palette, idx int, conn
 	ui.Row(c.Key(key)).Padding(7, 10).Radius(10).Background(p.card).Border(1, p.border).
 		AlignItems(ui.Center).Gap(8).Children(func() {
 
-		// 左侧目标信息与元标签
-		ui.Column(c).Grow(1).MinWidth(0).Gap(2.5).Children(func() {
+		// 左侧目标信息与元标签（点击可直接在抓包分析大窗口中按该域名过滤查看请求）
+		leftCol := ui.Column(c.Key("inspect")).Grow(1).MinWidth(0).Gap(2.5).
+			Cursor(ui.CursorPointer).Tooltip("点击在抓包分析窗口中查看该域名请求")
+		leftCol.Children(func() {
 			target := conn.TargetAddr
 			if conn.TargetPort > 0 {
 				target = fmt.Sprintf("%s:%d", conn.TargetAddr, conn.TargetPort)
@@ -635,6 +653,13 @@ func (vm *viewModel) renderConnectionRow(c *ui.Context, p palette, idx int, conn
 				}
 			})
 		})
+		if leftCol.Clicked() && vm.app != nil {
+			filter := strings.TrimSpace(conn.TargetAddr)
+			if filter == "" {
+				filter = strings.TrimSpace(conn.ProcessName)
+			}
+			vm.app.openCaptureWindow(filter)
+		}
 
 		// 右侧快捷操作：加直连 / 加代理 / 断开
 		if conn.TargetAddr != "" {

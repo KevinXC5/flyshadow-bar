@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,9 +36,13 @@ type App struct {
 	eng     *engine.Engine
 	ctrl    *control.Server
 	tray    *trayController
-	win       *mygo.Window
-	vm        *viewModel
-	updates   *UpdateManager
+	win          *mygo.Window
+	vm           *viewModel
+	captureWin   *mygo.Window
+	captureVM    *captureViewModel
+	captureUnsub func()
+	captureDirty chan struct{}
+	updates      *UpdateManager
 	prefs     config.AppPrefs
 	prefsPath string
 
@@ -52,7 +58,14 @@ type App struct {
 
 // Run 启动单进程 GUI/托盘桌面应用，阻塞直至应用退出。
 func Run(opts RunOptions) error {
-	mygo.App.SetName("FlyShadow Bar")
+	isolatedInstance := strings.TrimSpace(opts.ConfigPath) != "" ||
+		strings.TrimSpace(os.Getenv("FLYSHADOW_BAR_DIR")) != "" ||
+		strings.TrimSpace(os.Getenv("FLYSHADOW_CONFIG_DIR")) != ""
+	if isolatedInstance {
+		mygo.App.SetName("FlyShadow Bar Dev")
+	} else {
+		mygo.App.SetName("FlyShadow Bar")
+	}
 	// 正式打包由 mygo build 注入 packageVersion；仅在未注入时回退到 version.Version，
 	// 避免覆盖 mygo.Updater 用于匹配增量补丁的当前版本号。
 	if v := mygo.App.Version(); v != "" && v != "0.0.0" {
@@ -61,7 +74,7 @@ func Run(opts RunOptions) error {
 		mygo.App.SetVersion(version.Version)
 	}
 
-	if !mygo.App.RequestSingleInstanceLock() {
+	if !isolatedInstance && !mygo.App.RequestSingleInstanceLock() {
 		log.Printf("[app] 检测到已有 FlyShadow Bar 实例在运行，唤醒现有实例后退出")
 		return nil
 	}
@@ -89,10 +102,11 @@ func Run(opts RunOptions) error {
 	}
 
 	app := &App{
-		eng:       eng,
-		prefs:     prefs,
-		prefsPath: prefsPath,
-		stopCh:    make(chan struct{}),
+		eng:          eng,
+		prefs:        prefs,
+		prefsPath:    prefsPath,
+		stopCh:       make(chan struct{}),
+		captureDirty: make(chan struct{}, 1),
 	}
 	app.updates = newUpdateManager(func() {
 		mygo.RunOnMain(func() {
@@ -199,6 +213,9 @@ func (a *App) onReady(opts RunOptions) {
 
 	// 仅在窗口打开且位于「连接」页时按需轮询活跃连接，平时零额外开销
 	go a.connectionsPollLoop()
+
+	// 抓包大窗口节流刷新循环（窗口未打开时零开销）
+	go a.captureRefreshLoop()
 
 	// 安装完成后自动将命令行工具 fsbar 链接到对应的 PATH 目录（开发调试或隔离验收模式仅做只读检测）
 	go a.ensureCLIOnStartup(opts.DisableAutoSysProxy)
@@ -368,6 +385,10 @@ func (a *App) cleanup() {
 	a.closeOnce.Do(func() {
 		if a.stopCh != nil {
 			close(a.stopCh)
+		}
+		if a.captureUnsub != nil {
+			a.captureUnsub()
+			a.captureUnsub = nil
 		}
 		if a.unsub != nil {
 			a.unsub()
@@ -619,6 +640,153 @@ func (a *App) setThemeMode(mode string) {
 	}
 	if a.win != nil {
 		a.win.Invalidate()
+	}
+	if a.captureWin != nil {
+		a.captureWin.Invalidate()
+	}
+}
+
+// calcPreferredCaptureWindowSize 根据主屏工作区自适应计算抓包分析大窗口默认尺寸：
+// 大屏默认 1360×860 便于完整浏览 Headers 与格式化 JSON Body，小屏则贴合工作区保留安全边距。
+func calcPreferredCaptureWindowSize() (int, int) {
+	disp := mygo.Screen.PrimaryDisplay()
+	workW := disp.WorkArea.Width
+	workH := disp.WorkArea.Height
+	if workW <= 0 {
+		workW = disp.Bounds.Width
+	}
+	if workH <= 0 {
+		workH = disp.Bounds.Height
+	}
+	w, h := 1360, 860
+	if workW > 0 {
+		maxW := max(960, int(float64(workW)*0.90))
+		if w > maxW {
+			w = maxW
+		}
+	}
+	if workH > 0 {
+		maxH := max(620, int(float64(workH)*0.88))
+		if h > maxH {
+			h = maxH
+		}
+	}
+	return w, h
+}
+
+// ensureCaptureWindow 按需懒创建独立的宽屏“抓包分析”大窗口（非置顶、失焦不收起、可自由缩放）。
+func (a *App) ensureCaptureWindow() {
+	if a.captureWin != nil {
+		return
+	}
+	if a.captureVM == nil {
+		a.captureVM = newCaptureViewModel(a)
+	}
+	w, h := calcPreferredCaptureWindowSize()
+	a.captureWin = mygo.NewWindow(mygo.WindowOptions{
+		Title:     "FlyShadow Bar · 抓包分析",
+		Width:     w,
+		Height:    h,
+		MinWidth:  960,
+		MinHeight: 620,
+		StateKey:  "capture-inspector-v2",
+		Hidden:    true,
+		Content:   ui.View(a.captureVM.render),
+	})
+	a.captureWin.OnClose(func(e *mygo.CloseEvent) {
+		if !a.quitting {
+			e.PreventDefault()
+			a.captureWin.Hide()
+		}
+	})
+	if a.captureUnsub == nil && a.eng != nil && a.eng.CaptureStore() != nil {
+		a.captureUnsub = a.eng.CaptureStore().Subscribe(func() {
+			select {
+			case a.captureDirty <- struct{}{}:
+			default:
+			}
+		})
+	}
+}
+
+// openCaptureWindow 打开独立宽屏“抓包分析”窗口；若提供 initialFilter，自动填入搜索框便于追踪目标域名或进程。
+func (a *App) openCaptureWindow(initialFilter string) {
+	a.ensureCaptureWindow()
+	if a.captureWin == nil {
+		return
+	}
+	if a.captureVM != nil && a.eng != nil {
+		a.captureVM.status = a.eng.CaptureStatus()
+		a.captureVM.entries = a.eng.CaptureStore().Snapshot()
+		if strings.TrimSpace(initialFilter) != "" {
+			a.captureVM.searchQuery = strings.TrimSpace(initialFilter)
+		}
+	}
+	// 打开独立大窗口时收起菜单栏小弹窗（若未置顶），避免遮挡大窗口视野
+	if !a.pinWindow && a.isWindowVisible() {
+		a.hideWindow()
+	}
+	a.captureWin.Restore()
+	a.captureWin.Show()
+	a.captureWin.Focus()
+	mygo.App.Focus()
+	a.captureWin.Invalidate()
+}
+
+func (a *App) hideCaptureWindow() {
+	if a.captureWin != nil {
+		a.captureWin.Hide()
+	}
+}
+
+func (a *App) updateCaptureWindow(fn func()) {
+	if a.captureWin == nil {
+		return
+	}
+	a.captureWin.Update(fn)
+}
+
+func (a *App) captureRefreshLoop() {
+	const throttle = 120 * time.Millisecond
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case <-a.captureDirty:
+			// 合并突发高频请求的刷新事件，降低 UI 重绘压力
+			select {
+			case <-a.stopCh:
+				return
+			case <-time.After(throttle):
+			}
+			// 排干合并窗口内积压的信号
+			for {
+				select {
+				case <-a.captureDirty:
+				default:
+					goto syncNow
+				}
+			}
+		syncNow:
+			if a.eng == nil || a.eng.CaptureStore() == nil {
+				continue
+			}
+			var visible bool
+			mygo.RunOnMain(func() {
+				visible = a.captureWin != nil && a.captureWin.IsVisible()
+			})
+			if !visible {
+				continue
+			}
+			st := a.eng.CaptureStatus()
+			entries := a.eng.CaptureStore().Snapshot()
+			a.updateCaptureWindow(func() {
+				if a.captureVM != nil {
+					a.captureVM.status = st
+					a.captureVM.entries = entries
+				}
+			})
+		}
 	}
 }
 

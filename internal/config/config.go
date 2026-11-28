@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -341,6 +342,8 @@ type AppPrefs struct {
 	ShowTraySpeed            bool     `json:"showTraySpeed"`                      // macOS 菜单栏是否显示实时速率
 	UpdateRepo               string   `json:"updateRepo,omitempty"`
 	SysProxyExcludedServices []string `json:"sysProxyExcludedServices,omitempty"` // macOS 系统代理排除的网络服务名列表
+	CaptureMITMEnabled       bool     `json:"captureMitmEnabled,omitempty"`       // 抓包分析是否开启白名单 HTTPS 解密
+	CaptureMITMHosts         []string `json:"captureMitmHosts,omitempty"`         // 白名单 HTTPS 解密域名列表
 }
 
 var appPrefsMu sync.Mutex
@@ -1233,7 +1236,40 @@ func LoadAppPrefs(path string) AppPrefs {
 		prefs.ThemeMode = "system"
 	}
 	prefs.SysProxyExcludedServices = NormalizeServiceNames(prefs.SysProxyExcludedServices)
+	prefs.CaptureMITMHosts = NormalizeHostPatterns(prefs.CaptureMITMHosts)
 	return prefs
+}
+
+// NormalizeHostPatterns 规范化并去重抓包 MITM 域名白名单（小写、去除协议前缀和端口）。
+func NormalizeHostPatterns(patterns []string) []string {
+	if len(patterns) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(patterns))
+	out := make([]string, 0, len(patterns))
+	for _, raw := range patterns {
+		s := strings.ToLower(strings.TrimSpace(raw))
+		s = strings.TrimPrefix(s, "https://")
+		s = strings.TrimPrefix(s, "http://")
+		if idx := strings.IndexByte(s, '/'); idx >= 0 {
+			s = s[:idx]
+		}
+		if h, _, err := net.SplitHostPort(s); err == nil && h != "" {
+			s = h
+		}
+		s = strings.Trim(s, "[]")
+		s = strings.TrimSuffix(s, ".")
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 // SaveAppPrefs 原子保存 flyshadow-bar 自身偏好文件。
@@ -1246,6 +1282,7 @@ func SaveAppPrefs(path string, prefs AppPrefs) error {
 		}
 	}
 	prefs.SysProxyExcludedServices = NormalizeServiceNames(prefs.SysProxyExcludedServices)
+	prefs.CaptureMITMHosts = NormalizeHostPatterns(prefs.CaptureMITMHosts)
 	data, err := json.MarshalIndent(prefs, "", "  ")
 	if err != nil {
 		return err
@@ -1264,6 +1301,7 @@ func UpdateAppPrefs(path string, fn func(*AppPrefs)) (AppPrefs, error) {
 		fn(&prefs)
 	}
 	prefs.SysProxyExcludedServices = NormalizeServiceNames(prefs.SysProxyExcludedServices)
+	prefs.CaptureMITMHosts = NormalizeHostPatterns(prefs.CaptureMITMHosts)
 	if err := SaveAppPrefs(path, prefs); err != nil {
 		return prefs, err
 	}

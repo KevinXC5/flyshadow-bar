@@ -28,6 +28,7 @@
 - **单二进制双形态（CLI 名称 `fsbar`）**：入口位于 `cmd/fsbar/`，无参数或仅带 GUI 标志（`--gui`/`--hidden`/`--config`/`--core-lib`/`--no-connect`/`--no-auto-sysproxy`/`-psn_*`）时启动常驻 GUI；携带子命令时通过本地回环 Bearer Token 控制接口（`~/.flyshadowbar/flyshadow-bar.run.json`，权限 `0600`）与运行中实例通信，且所有子命令均支持 `fsbar help <子命令>` 与 `--help`。
 - **包职责划分**：
   - `internal/applog`：自动滚动程序日志（`~/.flyshadowbar/logs/flyshadow-bar.log`，5 MiB × 3 备份、敏感凭据兜底脱敏、panic 堆栈捕获与尾部读取）。
+  - `internal/capture`：零 CGO 透明前置抓包混合代理（HTTP/HTTPS/SOCKS5 TCP & UDP Associate）、纯内存环形仓库、白名单 HTTPS MITM、本机专属自签 Root CA 生成与 macOS/Windows 系统信任自动化，以及 TLS ClientHello / DNS / QUIC / STUN 协议解析。
   - `internal/cliinstall`：跨平台命令行工具 `fsbar` 自动链接/注册到系统 `PATH` 目录与冲突保护。
   - `internal/cloud`：官方云端订阅与自定义分流规则双向同步客户端（DoH TXT 发现、代理/直连自动回退、凭据脱敏）。
   - `internal/config`：独立主目录 `~/.flyshadowbar` 管理与旧目录无损迁移、无损配置加载/保存、节点匹配、13 种官方分流规则与自定义规则 CRUD、客户端独立偏好 `flyshadow-bar.prefs.json`。
@@ -36,7 +37,7 @@
   - `internal/engine`：单进程运行时引擎（隧道热切换、规则热重载不中断隧道、并发测速、1s 流量采样、连接监控、启动自动代理与退出清理）。
   - `internal/control`：仅监听 `127.0.0.1:0` 的随机端口 + 随机 Bearer Token 本地 HTTP 控制服务与客户端。
   - `internal/updater`：GitHub Releases 版本检测、SemVer 比较与按平台挑选产物下载。
-  - `internal/ui`：MyGo 原生主窗口、托盘菜单、图标、增量更新管理器与视图（`app.go`、`tray.go`、`updates.go`、`window.go`、`rules_view.go`、`conns_view.go`）。
+  - `internal/ui`：MyGo 原生主窗口、独立宽屏抓包分析窗口、托盘菜单、图标、增量更新管理器与视图（`app.go`、`tray.go`、`updates.go`、`window.go`、`capture_window.go`、`rules_view.go`、`conns_view.go`）。
   - `internal/version`：版本、Commit、BuildDate 与仓库元数据（由 `Makefile` `ldflags` / `MYGO_LDFLAGS` 注入）。
 - 常用命令入口统一走 `Makefile`：`make build`、`make run`、`make test`、`make test-live`、`make vet`、`make build-local`、`make build-macos`、`make build-win`、`make release-local`、`make clean`。
 

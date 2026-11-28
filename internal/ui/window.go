@@ -381,6 +381,17 @@ func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 				}
 			}
 
+			captureOn := vm.snap.CaptureEnabled
+			capTip := "打开抓包分析窗口（查看 HTTP/HTTPS/UDP 请求详情）"
+			capFg, capBg, capBorder := p.accent, p.accentSoft, p.borderStrong
+			if captureOn {
+				capTip = "抓包录制中 · 点击打开抓包分析窗口"
+				capFg, capBg, capBorder = p.danger, p.dangerSoft, p.danger
+			}
+			if renderToolbarIconBtn(c, p, "btn-titlebar-capture", "抓包分析", capTip, svgActivity, captureOn, capFg, capBg, capBorder, false) && vm.app != nil {
+				vm.app.openCaptureWindow("")
+			}
+
 			pinned := vm.isWindowPinned()
 			pinIcon := svgPin
 			pinTip := "置顶窗口（切换应用时不自动收起）"

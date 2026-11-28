@@ -1097,3 +1097,89 @@ func TestEnginePingCurrentNodeRetryAndStatusReconcile(t *testing.T) {
 		t.Fatalf("expected real traffic to clear probeFailed and restore StateConnected, got %s", snap.State)
 	}
 }
+
+func TestEngineCaptureProxyLifecycleAndMITMWhitelist(t *testing.T) {
+	cfgPath := writeTestConfig(t)
+	prefsPath := config.PrefsPathForConfig(cfgPath)
+
+	// 预先写入主题偏好，验证抓包偏好更新不会覆盖原有偏好
+	if _, err := config.UpdateAppPrefs(prefsPath, func(p *config.AppPrefs) {
+		p.ThemeMode = "dark"
+	}); err != nil {
+		t.Fatalf("seed prefs: %v", err)
+	}
+
+	// 分配一个空闲测试端口，避免与宿主机代理冲突
+	port, err := pickFreeLoopbackPort(0)
+	if err != nil {
+		t.Fatalf("pickFreeLoopbackPort: %v", err)
+	}
+
+	mc := &mockCore{}
+	sp := &mockSysProxy{}
+	eng, err := New(Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          mc,
+		SysProxy:            sp,
+		DisableAutoSysProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer eng.Shutdown()
+
+	if err := eng.UpdateLocalProxySettings(port, false); err != nil {
+		t.Fatalf("UpdateLocalProxySettings: %v", err)
+	}
+
+	// 1. 开启前置抓包代理：核心库应切到内部回环端口，前置代理接管用户端口
+	if err := eng.SetCaptureEnabled(true); err != nil {
+		t.Fatalf("SetCaptureEnabled(true): %v", err)
+	}
+	st := eng.CaptureStatus()
+	if !st.Enabled || st.ProxyPort != port || st.CoreInternalPort <= 0 || st.CoreInternalPort == port {
+		t.Fatalf("unexpected capture status after enable: %+v", st)
+	}
+	mc.mu.Lock()
+	corePortWhileCapture := mc.proxyPort
+	mc.mu.Unlock()
+	if corePortWhileCapture != st.CoreInternalPort {
+		t.Fatalf("expected core proxy on internal port %d, got %d", st.CoreInternalPort, corePortWhileCapture)
+	}
+
+	// 2. 开启白名单 MITM 并增删域名，验证持久化且不覆盖 ThemeMode
+	if err := eng.SetMITMEnabled(true); err != nil {
+		t.Fatalf("SetMITMEnabled(true): %v", err)
+	}
+	hosts, err := eng.AddMITMHost("https://GitHub.com:443/path")
+	if err != nil || len(hosts) != 1 || hosts[0] != "github.com" {
+		t.Fatalf("AddMITMHost = (%v, %v)", hosts, err)
+	}
+	if _, err := eng.AddMITMHost("*.openai.com"); err != nil {
+		t.Fatalf("AddMITMHost wildcard: %v", err)
+	}
+	prefs := config.LoadAppPrefs(prefsPath)
+	if !prefs.CaptureMITMEnabled || prefs.ThemeMode != "dark" || len(prefs.CaptureMITMHosts) != 2 {
+		t.Fatalf("unexpected persisted prefs: %+v", prefs)
+	}
+	if _, err := eng.RemoveMITMHost("github.com"); err != nil {
+		t.Fatalf("RemoveMITMHost: %v", err)
+	}
+	if got := eng.CaptureStatus().MITMHosts; len(got) != 1 || got[0] != "*.openai.com" {
+		t.Fatalf("unexpected MITM hosts after remove: %v", got)
+	}
+
+	// 3. 关闭前置抓包代理：核心库应无缝还原到用户原端口
+	if err := eng.SetCaptureEnabled(false); err != nil {
+		t.Fatalf("SetCaptureEnabled(false): %v", err)
+	}
+	if eng.CaptureStatus().Enabled {
+		t.Fatalf("expected capture disabled")
+	}
+	mc.mu.Lock()
+	restoredPort := mc.proxyPort
+	mc.mu.Unlock()
+	if restoredPort != port {
+		t.Fatalf("expected core proxy restored to user port %d, got %d", port, restoredPort)
+	}
+}

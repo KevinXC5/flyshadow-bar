@@ -599,6 +599,15 @@ func (tc *trayController) buildMenuForOS(snap engine.Snapshot, goos string) *myg
 			},
 		},
 		&mygo.MenuItem{
+			ID:    "action-capture",
+			Label: "抓包分析…",
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				if tc.app != nil {
+					mygo.RunOnMain(func() { tc.app.openCaptureWindow("") })
+				}
+			},
+		},
+		&mygo.MenuItem{
 			ID:    "action-reload",
 			Label: "重载配置",
 			Click: func(*mygo.MenuItem, *mygo.Window) {

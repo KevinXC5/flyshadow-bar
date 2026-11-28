@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/capture"
 	"github.com/KevinXC5/flyshadow-bar/internal/cloud"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
@@ -121,6 +123,7 @@ type Snapshot struct {
 	Pinging                bool                    `json:"pinging"`
 	PingCompleted          int                     `json:"pingCompleted"`
 	PingTotal              int                     `json:"pingTotal"`
+	CaptureEnabled         bool                    `json:"captureEnabled"`
 	Nodes                  []NodeSnapshot          `json:"nodes"`
 	UpdatedAt              int64                   `json:"updatedAt"`
 }
@@ -190,6 +193,20 @@ type Engine struct {
 	selfProcNames  []string
 	procTraffic    *processTrafficTracker
 
+	// 抓包分析与白名单 HTTPS MITM 状态
+	captureStore     *capture.Store
+	captureCA        *capture.CAManager
+	captureProxy     *capture.Proxy
+	captureEnabled   bool
+	captureCorePort  int
+	mitmEnabled      bool
+	mitmHosts        []string
+	certStatus       capture.CertStatus
+	certStatusCached bool
+	captureProcMu    sync.Mutex
+	captureProcMap   map[string]string
+	captureProcAt    time.Time
+
 	sysProxyCheckInterval    time.Duration
 	connectPollInterval      time.Duration
 	connectPollAttempts      int
@@ -241,9 +258,11 @@ func New(opts Options) (*Engine, error) {
 		speedHistory:        make([]SpeedSample, maxSpeedHistoryPoints),
 		listeners:           make(map[int]func(Snapshot)),
 		connProcCache:         make(map[string]string),
-		procLookupFn:          lookupLoopbackClients,
-		selfProcNames:         currentSelfProcessNames(),
-		procTraffic:           newProcessTrafficTracker(time.Now()),
+		procLookupFn:             lookupLoopbackClients,
+		selfProcNames:            currentSelfProcessNames(),
+		procTraffic:              newProcessTrafficTracker(time.Now()),
+		captureStore:             capture.NewStore(capture.DefaultMaxEntries),
+		captureCA:                capture.NewCAManager(filepath.Join(filepath.Dir(cfg.Path), "mitm")),
 		sysProxyCheckInterval:    defaultSysProxyCheckInterval,
 		connectPollInterval:      defaultConnectPollInterval,
 		connectPollAttempts:      defaultConnectPollAttempts,
@@ -264,10 +283,14 @@ func New(opts Options) (*Engine, error) {
 
 	e.applyConfigToCoreLocked()
 
+	// 加载客户端独立偏好（白名单 MITM 配置 + macOS 系统代理网卡排除列表）
+	prefs := config.LoadAppPrefs(e.prefsPath)
+	e.mitmEnabled = prefs.CaptureMITMEnabled
+	e.mitmHosts = capture.NormalizeHostPatterns(prefs.CaptureMITMHosts)
+
 	// 若当前平台支持按网络服务过滤系统代理（macOS），加载持久化的排除列表并缓存网卡列表
 	if sf, ok := sp.(sysproxy.ServiceFilterManager); ok {
 		e.sysProxyServiceSupported = true
-		prefs := config.LoadAppPrefs(e.prefsPath)
 		excluded := config.NormalizeServiceNames(prefs.SysProxyExcludedServices)
 		sf.SetExcludedServices(excluded)
 		e.sysProxyExcluded = excluded
@@ -375,6 +398,17 @@ func (e *Engine) Shutdown() {
 			e.systemProxyOn = false
 			e.mu.Unlock()
 		}
+	}
+
+	// 先关闭前置抓包代理（若处于开启状态），再释放底层核心资源
+	e.mu.Lock()
+	front := e.captureProxy
+	e.captureProxy = nil
+	e.captureEnabled = false
+	e.captureCorePort = 0
+	e.mu.Unlock()
+	if front != nil {
+		_ = front.Close()
 	}
 
 	if e.core != nil {
@@ -522,6 +556,7 @@ func (e *Engine) Snapshot() Snapshot {
 		Pinging:                e.pinging,
 		PingCompleted:          e.pingCompleted,
 		PingTotal:              e.pingTotal,
+		CaptureEnabled:         e.captureEnabled,
 		Nodes:                  nodeSnaps,
 		UpdatedAt:              time.Now().UnixMilli(),
 	}
@@ -1953,11 +1988,16 @@ func (e *Engine) applyConfigToCoreLocked() {
 
 func (e *Engine) startLocalProxyLocked() error {
 	e.mu.RLock()
+	captureOn := e.captureEnabled
 	port := e.cfg.ProxyPort
 	allowLAN := e.cfg.AllowLanConnection
 	user := e.cfg.ProxyUsername
 	pass := e.cfg.ProxyPassword
 	e.mu.RUnlock()
+
+	if captureOn {
+		return e.startCaptureFrontProxyLocked()
+	}
 
 	// 重启更新时旧进程可能仍在短暂释放监听套接字，最多重试 10 次（约 1.5s），绝不擅自改动端口
 	var err error
