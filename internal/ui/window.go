@@ -357,22 +357,30 @@ func (vm *viewModel) render(c *ui.Context) {
 func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
 	bar := c.TitleBar()
 	h := max(bar.Height, 40)
+	winW, _ := c.Size()
+	narrow := winW > 0 && winW < 470
 	// 与下方主内容区左右 14px 内边距保持严格像素对齐
 	leftPad := max(bar.Left+12, 14)
 	rightPad := max(bar.Right+12, 14)
+	gap := float32(6)
+	segPadX := float32(0) // 0 表示使用默认舒适内边距
+	if narrow {
+		gap = 4
+		segPadX = 8
+	}
 
-	ui.Row(c).Height(h).Padding(0, rightPad, 0, leftPad).AlignItems(ui.Center).Gap(8).
+	ui.Row(c).Height(h).Padding(0, rightPad, 0, leftPad).AlignItems(ui.Center).Gap(6).
 		DragWindow().Children(func() {
-		ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
 			if logo := appLogoBitmap(); logo != nil {
 				ui.Image(c, logo).Size(20, 20).Fit(ui.Contain)
 			}
-			ui.Text(c, "FlyShadow Bar").FontSize(13).Bold().TextColor(p.text)
+			ui.Text(c, "FlyShadow Bar").FontSize(13).Bold().TextColor(p.text).NoWrap()
 		})
 		ui.Spacer(c)
-		ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Gap(gap).Children(func() {
 			prevTab := vm.activeTab
-			if renderSegmented(c.Key("nav-tabs"), p, &vm.activeTab, "节点", "规则", "连接", "设置").Changed() {
+			if renderSegmentedWithPadX(c.Key("nav-tabs"), p, &vm.activeTab, segPadX, "节点", "规则", "连接", "设置").Changed() {
 				if vm.activeTab != 2 {
 					vm.connSortMenuOpen = false
 				}
@@ -1627,7 +1635,14 @@ func applyPointerCursor(el ui.Element, disabled bool) ui.Element {
 // renderSegmented 使用 SegmentedBase 渲染分段切换控件，并为每个分段项显式设置手型光标，
 // 避免 mygo 内置 Segmented 子项截断外层 CursorPointer 继承。
 func renderSegmented(c *ui.Context, p palette, selected *int, labels ...string) ui.Element {
+	return renderSegmentedWithPadX(c, p, selected, 0, labels...)
+}
+
+func renderSegmentedWithPadX(c *ui.Context, p palette, selected *int, padX float32, labels ...string) ui.Element {
 	t := c.Theme()
+	if padX <= 0 {
+		padX = t.Space(3.5)
+	}
 	parts := ui.SegmentedBase(c, selected, len(labels))
 	g := parts.Track
 	g.AlignItems(ui.Stretch).Padding(t.Space(0.5)).Gap(t.Space(0.5)).
@@ -1640,7 +1655,7 @@ func renderSegmented(c *ui.Context, p palette, selected *int, labels ...string) 
 	g.Children(func() {
 		for i, label := range labels {
 			s := parts.Segment(i)
-			s.Padding(t.Space(1.5), t.Space(3.5)).Radius(segRadius).Cursor(ui.CursorPointer)
+			s.Padding(t.Space(1.5), padX).Radius(segRadius).Cursor(ui.CursorPointer)
 			if i == *selected {
 				s.Background(selectedBg).Shadow(0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.12))
 			} else if s.Hovered() {
