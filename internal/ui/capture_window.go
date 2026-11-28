@@ -120,9 +120,14 @@ func (vm *captureViewModel) render(c *ui.Context) {
 
 func (vm *captureViewModel) renderHeaderBar(c *ui.Context, p palette) {
 	st := vm.status
+	bar := c.TitleBar()
+	barH := max(bar.Height, 48)
+	leftPad := max(bar.Left+12, 14)
+	rightPad := max(bar.Right+12, 14)
 
 	ui.Column(c).Background(p.card).Children(func() {
-		ui.Row(c).Padding(10, 14).AlignItems(ui.Center).Gap(10).Children(func() {
+		ui.Row(c).Height(barH).Padding(0, rightPad, 0, leftPad).AlignItems(ui.Center).Gap(10).
+			DragWindow().Children(func() {
 		// 左侧应用标识与标题
 		ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
 			ui.Box(c).Size(24, 24).Radius(7).Background(p.accentSoft).Center().Children(func() {

@@ -684,14 +684,17 @@ func (a *App) ensureCaptureWindow() {
 	}
 	w, h := calcPreferredCaptureWindowSize()
 	a.captureWin = mygo.NewWindow(mygo.WindowOptions{
-		Title:     "FlyShadow Bar · 抓包分析",
-		Width:     w,
-		Height:    h,
-		MinWidth:  960,
-		MinHeight: 620,
-		StateKey:  "capture-inspector-v2",
-		Hidden:    true,
-		Content:   ui.View(a.captureVM.render),
+		Title:                "FlyShadow Bar · 抓包分析",
+		Width:                w,
+		Height:               h,
+		MinWidth:             960,
+		MinHeight:            620,
+		StateKey:             "capture-inspector-v2",
+		Hidden:               true,
+		TitleBarStyle:        mygo.TitleBarHidden,
+		TrafficLightPosition: &mygo.Point{X: 16, Y: 18},
+		TitleBarHeight:       48,
+		Content:              ui.View(a.captureVM.render),
 	})
 	a.captureWin.OnClose(func(e *mygo.CloseEvent) {
 		if !a.quitting {
