@@ -44,9 +44,21 @@ type Proxy struct {
 	mitmEnabled bool
 	mitmHosts   []string
 
+	tunnelMu      sync.Mutex
+	nextTunnelID  uint64
+	activeTunnels map[uint64]activeTunnel
+
 	ln     net.Listener
 	closed atomic.Bool
 	wg     sync.WaitGroup
+}
+
+type activeTunnel struct {
+	host       string
+	isTLS      bool
+	mitm       bool
+	clientConn net.Conn
+	upConn     net.Conn
 }
 
 // StartProxy 启动前置抓包代理监听。
@@ -70,10 +82,11 @@ func StartProxy(opts ProxyOptions) (*Proxy, error) {
 	}
 
 	p := &Proxy{
-		opts:        opts,
-		mitmEnabled: opts.MITMEnabled,
-		mitmHosts:   NormalizeHostPatterns(opts.MITMHosts),
-		ln:          ln,
+		opts:          opts,
+		mitmEnabled:   opts.MITMEnabled,
+		mitmHosts:     NormalizeHostPatterns(opts.MITMHosts),
+		activeTunnels: make(map[uint64]activeTunnel),
+		ln:            ln,
 	}
 	p.wg.Add(1)
 	go p.acceptLoop()
@@ -88,15 +101,72 @@ func (p *Proxy) Addr() string {
 	return p.ln.Addr().String()
 }
 
-// UpdateMITMConfig 热更新白名单 HTTPS 解密开关与域名列表，无需重启监听。
-func (p *Proxy) UpdateMITMConfig(enabled bool, hosts []string) {
+// UpdateMITMConfig 热更新白名单 HTTPS 解密开关与域名列表，并主动断开受影响域名的既有长连接，
+// 让新加入或移出白名单的域名在下一条请求立即按最新策略重建 TLS 握手，不影响无关域名连接。
+func (p *Proxy) UpdateMITMConfig(enabled bool, hosts []string) int {
 	if p == nil {
-		return
+		return 0
 	}
+	normHosts := NormalizeHostPatterns(hosts)
 	p.mu.Lock()
 	p.mitmEnabled = enabled
-	p.mitmHosts = NormalizeHostPatterns(hosts)
+	p.mitmHosts = normHosts
 	p.mu.Unlock()
+
+	return p.dropMismatchedTLSTunnels(enabled, normHosts)
+}
+
+func (p *Proxy) registerActiveTunnel(t activeTunnel) uint64 {
+	if p == nil {
+		return 0
+	}
+	p.tunnelMu.Lock()
+	p.nextTunnelID++
+	id := p.nextTunnelID
+	if p.activeTunnels == nil {
+		p.activeTunnels = make(map[uint64]activeTunnel)
+	}
+	p.activeTunnels[id] = t
+	p.tunnelMu.Unlock()
+	return id
+}
+
+func (p *Proxy) unregisterActiveTunnel(id uint64) {
+	if p == nil || id == 0 {
+		return
+	}
+	p.tunnelMu.Lock()
+	delete(p.activeTunnels, id)
+	p.tunnelMu.Unlock()
+}
+
+func (p *Proxy) dropMismatchedTLSTunnels(enabled bool, hosts []string) int {
+	if p == nil {
+		return 0
+	}
+	var toClose []activeTunnel
+	p.tunnelMu.Lock()
+	for id, t := range p.activeTunnels {
+		if !t.isTLS {
+			continue
+		}
+		wantMITM := p.opts.CA != nil && enabled && len(hosts) > 0 && MatchMITMHost(t.host, hosts)
+		if wantMITM != t.mitm {
+			toClose = append(toClose, t)
+			delete(p.activeTunnels, id)
+		}
+	}
+	p.tunnelMu.Unlock()
+
+	for _, t := range toClose {
+		if t.clientConn != nil {
+			_ = t.clientConn.Close()
+		}
+		if t.upConn != nil {
+			_ = t.upConn.Close()
+		}
+	}
+	return len(toClose)
 }
 
 func (p *Proxy) shouldMITM(host string) bool {
@@ -332,6 +402,7 @@ func (p *Proxy) forwardPlainHTTPRequest(clientConn net.Conn, req *http.Request, 
 }
 
 func (p *Proxy) handleHTTPConnect(clientConn net.Conn, br *bufio.Reader, targetHostPort, clientAddr, procName string) {
+	started := time.Now()
 	host, port := splitHostPortDefault(targetHostPort, 443)
 	if host == "" {
 		_, _ = io.WriteString(clientConn, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
@@ -346,7 +417,8 @@ func (p *Proxy) handleHTTPConnect(clientConn net.Conn, br *bufio.Reader, targetH
 		p.opts.Store.Add(Entry{
 			Kind:        KindHTTPS,
 			Protocol:    "HTTPS",
-			StartedAt:   time.Now(),
+			StartedAt:   started,
+			DurationMs:  time.Since(started).Milliseconds(),
 			ClientAddr:  clientAddr,
 			ProcessName: procName,
 			Host:        host,
@@ -400,9 +472,9 @@ func (p *Proxy) dialUpstreamConnect(target string) (net.Conn, error) {
 func (p *Proxy) handleTunneledStream(clientConn, upConn net.Conn, host string, port int, clientAddr, procName string) {
 	started := time.Now()
 
-	// 先读取首包片段以判断是否为 TLS 握手或明文 HTTP
+	// 先读取首包片段以判断是否为 TLS 握手或明文 HTTP（15 秒超时以兼容浏览器预连接池）
 	firstBuf := make([]byte, 4096)
-	_ = clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	n, readErr := clientConn.Read(firstBuf)
 	_ = clientConn.SetReadDeadline(time.Time{})
 	if n == 0 && readErr != nil {
@@ -454,6 +526,15 @@ func (p *Proxy) handleTunneledStream(clientConn, upConn net.Conn, host string, p
 		TLSALPN:       alpn,
 	})
 
+	tunnelID := p.registerActiveTunnel(activeTunnel{
+		host:       effectiveHost,
+		isTLS:      isTLS,
+		mitm:       false,
+		clientConn: clientConn,
+		upConn:     upConn,
+	})
+	defer p.unregisterActiveTunnel(tunnelID)
+
 	sent, recv := pipeBidirectional(replayClient, upConn)
 	p.opts.Store.Update(id, func(e *Entry) {
 		e.Active = false
@@ -468,6 +549,21 @@ func (p *Proxy) serveMITMTLS(clientConn, upConn net.Conn, host string, port int,
 	leafCert, err := p.opts.CA.CertForHost(host)
 	if err != nil {
 		log.Printf("[capture] 为 %s 签发 MITM 证书失败: %v", host, err)
+		p.opts.Store.Add(Entry{
+			Kind:          KindHTTPS,
+			Protocol:      "HTTPS",
+			StartedAt:     started,
+			DurationMs:    time.Since(started).Milliseconds(),
+			ClientAddr:    clientAddr,
+			ProcessName:   procName,
+			Host:          host,
+			Port:          port,
+			MITMDecrypted: false,
+			TLSVersion:    clientTLSVer,
+			TLSSNI:        clientSNI,
+			TLSALPN:       clientALPN,
+			Error:         fmt.Sprintf("签发本地 MITM 证书失败: %v", err),
+		})
 		return
 	}
 
@@ -533,6 +629,15 @@ func (p *Proxy) serveMITMTLS(clientConn, upConn net.Conn, host string, port int,
 	_ = tlsUp.SetDeadline(time.Time{})
 	defer tlsUp.Close()
 
+	tunnelID := p.registerActiveTunnel(activeTunnel{
+		host:       host,
+		isTLS:      true,
+		mitm:       true,
+		clientConn: tlsClient,
+		upConn:     tlsUp,
+	})
+	defer p.unregisterActiveTunnel(tunnelID)
+
 	cs := tlsUp.ConnectionState()
 	ver := formatTLSVersion(cs.Version)
 	alpn := cs.NegotiatedProtocol
@@ -554,6 +659,7 @@ func (p *Proxy) serveDirectHTTPStream(clientConn, upConn net.Conn, host string, 
 		kind = KindHTTPS
 	}
 
+	handledCount := 0
 	for {
 		_ = clientConn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		peek, peekErr := clientBR.Peek(1)
@@ -562,15 +668,53 @@ func (p *Proxy) serveDirectHTTPStream(clientConn, upConn net.Conn, host string, 
 			return
 		}
 		if peek[0] < 'A' || peek[0] > 'Z' {
-			// 非 HTTP 协议载荷，降级双向透传
-			_, _ = pipeBidirectional(&bufferedConn{Conn: clientConn, r: clientBR}, &bufferedConn{Conn: upConn, r: upBR})
+			// 非 HTTP 协议载荷，降级双向透传并补记连接会话
+			streamStarted := time.Now()
+			id := p.opts.Store.Add(Entry{
+				Kind:          kind,
+				Protocol:      strings.ToUpper(scheme),
+				StartedAt:     streamStarted,
+				Active:        true,
+				ClientAddr:    clientAddr,
+				ProcessName:   procName,
+				Host:          host,
+				Port:          port,
+				MITMDecrypted: isHTTPS,
+				TLSVersion:    tlsVer,
+				TLSSNI:        tlsSNI,
+				TLSALPN:       tlsALPN,
+			})
+			sent, recv := pipeBidirectional(&bufferedConn{Conn: clientConn, r: clientBR}, &bufferedConn{Conn: upConn, r: upBR})
+			p.opts.Store.Update(id, func(e *Entry) {
+				e.Active = false
+				e.DurationMs = time.Since(streamStarted).Milliseconds()
+				e.BytesSent = sent
+				e.BytesRecv = recv
+			})
 			return
 		}
 
 		req, err := http.ReadRequest(clientBR)
 		if err != nil {
+			if handledCount == 0 && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				p.opts.Store.Add(Entry{
+					Kind:          kind,
+					Protocol:      strings.ToUpper(scheme),
+					StartedAt:     time.Now(),
+					ClientAddr:    clientAddr,
+					ProcessName:   procName,
+					Host:          host,
+					Port:          port,
+					MITMDecrypted: isHTTPS,
+					TLSVersion:    tlsVer,
+					TLSSNI:        tlsSNI,
+					TLSALPN:       tlsALPN,
+					Error:         fmt.Sprintf("解析 HTTP 请求失败: %v", err),
+				})
+			}
 			return
 		}
+		handledCount++
 		started := time.Now()
 
 		reqBodyBytes, reqBodySize, reqTrunc, bodyErr := readBodyLimited(req.Body, p.opts.MaxBodyBytes)
@@ -730,9 +874,28 @@ func (p *Proxy) handleSOCKS5(clientConn net.Conn, br *bufio.Reader) {
 
 	switch cmd {
 	case 0x01: // CONNECT
+		started := time.Now()
 		upConn, err := p.dialUpstreamSOCKS5Connect(rawAddr)
 		if err != nil {
 			_, _ = clientConn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			kind, proto := KindTCP, "TCP"
+			switch dstPort {
+			case 443:
+				kind, proto = KindHTTPS, "HTTPS"
+			case 80:
+				kind, proto = KindHTTP, "HTTP"
+			}
+			p.opts.Store.Add(Entry{
+				Kind:        kind,
+				Protocol:    proto,
+				StartedAt:   started,
+				DurationMs:  time.Since(started).Milliseconds(),
+				ClientAddr:  clientAddr,
+				ProcessName: procName,
+				Host:        dstHost,
+				Port:        dstPort,
+				Error:       err.Error(),
+			})
 			return
 		}
 		defer upConn.Close()

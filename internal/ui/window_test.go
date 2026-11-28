@@ -9,6 +9,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"github.com/KevinXC5/flyshadow-bar/internal/capture"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
 	"github.com/KevinXC5/flyshadow-bar/internal/engine"
@@ -773,11 +774,20 @@ func TestInteractiveControlsUsePointerCursor(t *testing.T) {
 		assertPointerAt("标题栏-置顶窗口", pinBtn.Bounds)
 	}
 
-	// 2. 顶部快捷开关（系统代理 / UDP 加速 / 原生 UDP）
-	if sw, ok := tt.AccessByRole(ui.RoleSwitch, ""); !ok {
-		t.Fatalf("quick toggle switch not found")
-	} else {
-		assertPointerAt("快捷开关", sw.Bounds)
+	// 2. 顶部一行 4 联 Bento 快捷开关卡片（系统代理 / TUN 模式 / UDP 加速 / 原生 UDP）
+	tileLabels := []string{"系统代理", "TUN 模式", "UDP 加速", "原生 UDP"}
+	var firstTileY float32
+	for i, lbl := range tileLabels {
+		node, ok := tt.Access(lbl)
+		if !ok {
+			t.Fatalf("quick tile %q not found", lbl)
+		}
+		assertPointerAt("快捷卡片-"+lbl, node.Bounds)
+		if i == 0 {
+			firstTileY = node.Bounds.Y
+		} else if absFloat32(node.Bounds.Y-firstTileY) > 1.5 {
+			t.Fatalf("quick tile %q not on same row: y=%.1f want=%.1f", lbl, node.Bounds.Y, firstTileY)
+		}
 	}
 
 	// 3. 切到设置页，验证「查看规则」按钮与「外观」分段控件悬停也是手型指针
@@ -877,6 +887,50 @@ func TestSettingsSysProxyServicesVisibilityAndDisplay(t *testing.T) {
 
 	if ttWin.HasText("系统代理作用网卡") {
 		t.Fatalf("unsupported platform should hide 系统代理作用网卡 section, texts=%v", ttWin.Texts())
+	}
+}
+
+func TestCaptureConnectFailureDisplay(t *testing.T) {
+	failEntry := capture.Entry{
+		ID:       1,
+		Kind:     capture.KindHTTPS,
+		Protocol: "HTTPS",
+		Host:     "grok.com",
+		Port:     443,
+		Error:    "上游 CONNECT 返回 504 Gateway Timeout",
+	}
+	if !isConnectFailedBeforeTLS(failEntry) {
+		t.Fatalf("expected CONNECT failure before TLS to be classified as connect-failed")
+	}
+
+	tlsEntry := capture.Entry{
+		ID:         2,
+		Kind:       capture.KindHTTPS,
+		Protocol:   "TLS 1.3",
+		Host:       "example.com",
+		Port:       443,
+		TLSSNI:     "example.com",
+		TLSVersion: "TLS 1.3",
+		BytesRecv:  1024,
+	}
+	if isConnectFailedBeforeTLS(tlsEntry) {
+		t.Fatalf("normal TLS passthrough entry must not be classified as connect-failed")
+	}
+
+	vm := &captureViewModel{
+		entries:    []capture.Entry{failEntry},
+		selectedID: failEntry.ID,
+	}
+	tt := ui.NewTester(vm.render, 1280, 800)
+	tt.Frame()
+	if !tt.HasText("连接失败") {
+		t.Fatalf("expected 连接失败 badge on CONNECT failure row, texts=%v", tt.Texts())
+	}
+	if tt.HasText("当前 HTTPS 连接未解密（仅显示 TLS 握手元信息）") {
+		t.Fatalf("CONNECT failure detail should not show misleading TLS passthrough hint")
+	}
+	if !tt.HasText("连接在建立上游隧道阶段失败，尚未进入 TLS 握手与解密") {
+		t.Fatalf("expected connect failure troubleshooting banner, texts=%v", tt.Texts())
 	}
 }
 

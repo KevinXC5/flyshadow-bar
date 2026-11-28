@@ -459,3 +459,143 @@ func buildMockDNSResponse(name string, ip net.IP) []byte {
 	b.Write(ip.To4())
 	return b.Bytes()
 }
+
+func TestProxyUpdateMITMConfigDropsOnlyAffectedTunnels(t *testing.T) {
+	ca := NewCAManager(t.TempDir())
+	if err := ca.EnsureCA(); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
+	p := &Proxy{
+		opts:          ProxyOptions{CA: ca},
+		activeTunnels: make(map[uint64]activeTunnel),
+	}
+
+	c1a, c1b := net.Pipe()
+	defer c1a.Close()
+	defer c1b.Close()
+	u1a, u1b := net.Pipe()
+	defer u1a.Close()
+	defer u1b.Close()
+
+	c2a, c2b := net.Pipe()
+	defer c2a.Close()
+	defer c2b.Close()
+	u2a, u2b := net.Pipe()
+	defer u2a.Close()
+	defer u2b.Close()
+
+	p.registerActiveTunnel(activeTunnel{host: "x.com", isTLS: true, mitm: false, clientConn: c1a, upConn: u1a})
+	p.registerActiveTunnel(activeTunnel{host: "example.org", isTLS: true, mitm: false, clientConn: c2a, upConn: u2a})
+
+	// 仅将 *.x.com 加入白名单：应精准断开 x.com 的旧透传连接，不影响 example.org
+	if dropped := p.UpdateMITMConfig(true, []string{"*.x.com"}); dropped != 1 {
+		t.Fatalf("expected 1 dropped tunnel, got %d", dropped)
+	}
+	_ = c1b.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	buf := make([]byte, 1)
+	if _, err := c1b.Read(buf); err == nil {
+		t.Fatalf("expected x.com tunnel peer to observe close")
+	}
+	// example.org 仍应保持未关闭
+	_ = c2b.SetReadDeadline(time.Now().Add(40 * time.Millisecond))
+	_, err := c2b.Read(buf)
+	if err == nil {
+		t.Fatalf("unexpected data on idle example.org tunnel")
+	}
+	if nerr, ok := err.(net.Error); !ok || !nerr.Timeout() {
+		t.Fatalf("expected example.org tunnel to stay open (timeout), got %v", err)
+	}
+}
+
+func TestProxyConnectAndSOCKS5FailureRecorded(t *testing.T) {
+	// 模拟上游代理：HTTP CONNECT 返回 504，SOCKS5 CONNECT 返回 0x05（连接拒绝）
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer upLn.Close()
+	go func() {
+		for {
+			c, err := upLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				br := bufio.NewReader(conn)
+				b, err := br.Peek(1)
+				if err != nil || len(b) == 0 {
+					return
+				}
+				if b[0] == 0x05 {
+					// SOCKS5 握手成功，但 CONNECT 返回拒绝
+					hdr := make([]byte, 3)
+					_, _ = io.ReadFull(br, hdr)
+					_, _ = conn.Write([]byte{0x05, 0x00})
+					reqHdr := make([]byte, 4)
+					_, _ = io.ReadFull(br, reqHdr)
+					_, _, _, _ = readSOCKS5Addr(br, reqHdr[3])
+					time.Sleep(15 * time.Millisecond)
+					_, _ = conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+					return
+				}
+				_, _ = http.ReadRequest(br)
+				time.Sleep(15 * time.Millisecond)
+				_, _ = io.WriteString(conn, "HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\n\r\n")
+			}(c)
+		}
+	}()
+
+	store := NewStore(DefaultMaxEntries)
+	proxy, err := StartProxy(ProxyOptions{
+		ListenAddr:   "127.0.0.1:0",
+		UpstreamAddr: upLn.Addr().String(),
+		Store:        store,
+	})
+	if err != nil {
+		t.Fatalf("StartProxy: %v", err)
+	}
+	defer proxy.Close()
+
+	// 1. HTTP CONNECT 504
+	c1, err := net.DialTimeout("tcp", proxy.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy HTTP: %v", err)
+	}
+	_, _ = io.WriteString(c1, "CONNECT blocked.example:443 HTTP/1.1\r\nHost: blocked.example:443\r\n\r\n")
+	_, _ = io.ReadAll(c1)
+	_ = c1.Close()
+
+	// 2. SOCKS5 CONNECT 失败（对应 TUN 模式 TCP 失败）
+	c2, err := net.DialTimeout("tcp", proxy.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy SOCKS5: %v", err)
+	}
+	_, _ = c2.Write([]byte{0x05, 0x01, 0x00})
+	resp := make([]byte, 2)
+	_, _ = io.ReadFull(c2, resp)
+	host := "tunfail.example"
+	req := append([]byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}, []byte(host)...)
+	req = append(req, 0x01, 0xbb) // port 443
+	_, _ = c2.Write(req)
+	reply := make([]byte, 10)
+	_, _ = io.ReadFull(c2, reply)
+	_ = c2.Close()
+
+	snap := store.Snapshot()
+	if len(snap) < 2 {
+		t.Fatalf("expected at least 2 recorded error entries, got %d: %+v", len(snap), snap)
+	}
+	var gotHTTP, gotSOCKS bool
+	for _, e := range snap {
+		if e.Host == "blocked.example" && strings.Contains(e.Error, "504") && e.DurationMs >= 10 {
+			gotHTTP = true
+		}
+		if e.Host == "tunfail.example" && e.Kind == KindHTTPS && e.Error != "" && e.DurationMs >= 10 {
+			gotSOCKS = true
+		}
+	}
+	if !gotHTTP || !gotSOCKS {
+		t.Fatalf("expected both HTTP CONNECT 504 and SOCKS5 failure recorded with duration, gotHTTP=%v gotSOCKS=%v snap=%+v", gotHTTP, gotSOCKS, snap)
+	}
+}

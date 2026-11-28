@@ -165,7 +165,9 @@ func (e *Engine) SetMITMEnabled(enabled bool) error {
 	e.mu.Unlock()
 
 	if proxy != nil {
-		proxy.UpdateMITMConfig(enabled, hosts)
+		if dropped := proxy.UpdateMITMConfig(enabled, hosts); dropped > 0 {
+			log.Printf("[capture] MITM 开关变更，已断开 %d 条受影响域名的既有长连接", dropped)
+		}
 	}
 	if prefsPath != "" {
 		if _, err := config.UpdateAppPrefs(prefsPath, func(p *config.AppPrefs) {
@@ -195,7 +197,9 @@ func (e *Engine) AddMITMHost(pattern string) ([]string, error) {
 	e.mu.Unlock()
 
 	if proxy != nil {
-		proxy.UpdateMITMConfig(enabled, next)
+		if dropped := proxy.UpdateMITMConfig(enabled, next); dropped > 0 {
+			log.Printf("[capture] 加入解密白名单 %s，已断开 %d 条该域名的既有透传连接", norm, dropped)
+		}
 	}
 	if prefsPath != "" {
 		if _, err := config.UpdateAppPrefs(prefsPath, func(p *config.AppPrefs) {
@@ -225,7 +229,9 @@ func (e *Engine) RemoveMITMHost(pattern string) ([]string, error) {
 	e.mu.Unlock()
 
 	if proxy != nil {
-		proxy.UpdateMITMConfig(enabled, next)
+		if dropped := proxy.UpdateMITMConfig(enabled, next); dropped > 0 {
+			log.Printf("[capture] 移出解密白名单 %s，已断开 %d 条该域名的既有解密连接", norm, dropped)
+		}
 	}
 	if prefsPath != "" {
 		if _, err := config.UpdateAppPrefs(prefsPath, func(p *config.AppPrefs) {
@@ -288,6 +294,10 @@ func (e *Engine) startCaptureFrontProxyLocked() error {
 		return fmt.Errorf("分配内部上游端口失败: %w", err)
 	}
 
+	// 0. 在切端口前先快照核心库上的存量长连接，待 Go 抓包代理就绪后精准关闭，
+	// 防止浏览器等客户端继续复用开启抓包前建立的 HTTP/2 连接池而绕过抓包层。
+	preConns, _ := e.core.TunnelConnections()
+
 	// 1. 让底层核心库切换到内部回环端口并释放用户代理端口
 	if err := e.core.StartProxy(corePort, false, "", ""); err != nil {
 		return fmt.Errorf("切换底层代理至内部端口失败: %w", err)
@@ -337,8 +347,19 @@ func (e *Engine) startCaptureFrontProxyLocked() error {
 	e.proxyStarted = true
 	e.mu.Unlock()
 
-	log.Printf("[capture] 前置抓包代理已启用: listen=%s upstream=%s mitm=%v hosts=%d",
-		listenAddr, upstreamAddr, mitmEnabled, len(mitmHosts))
+	// 3. Go 前置抓包代理已开始监听用户端口，清理切入前的核心库存量连接，促使浏览器立即重连至抓包层。
+	droppedPre := 0
+	for _, c := range preConns {
+		key := c.CloseKey()
+		if key == "" || c.SourceAddr == "" || c.SourcePort <= 0 {
+			continue
+		}
+		e.core.CloseConnection(key)
+		droppedPre++
+	}
+
+	log.Printf("[capture] 前置抓包代理已启用: listen=%s upstream=%s mitm=%v hosts=%d droppedPreConns=%d",
+		listenAddr, upstreamAddr, mitmEnabled, len(mitmHosts), droppedPre)
 	return nil
 }
 

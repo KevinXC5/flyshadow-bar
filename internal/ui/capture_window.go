@@ -445,7 +445,7 @@ func (vm *captureViewModel) renderEntryListPane(c *ui.Context, p palette) {
 			}
 			ui.Text(c, summary).FontSize(11).TextColor(p.textMuted).NoWrap()
 			ui.Spacer(c)
-			ui.Text(c, "仅存内存 · 最多 500 条").FontSize(10).TextColor(p.textMuted).NoWrap()
+			ui.Text(c, fmt.Sprintf("仅存内存 · 最多 %d 条", capture.DefaultMaxEntries)).FontSize(10).TextColor(p.textMuted).NoWrap()
 		})
 
 		if len(filtered) == 0 {
@@ -542,9 +542,12 @@ func (vm *captureViewModel) renderEntryRow(c *ui.Context, p palette, e capture.E
 				renderMiniTag(c, compactProcessLabel(e.ProcessName, 18), p.textSecondary, p.pillBg)
 			}
 			if e.Kind == capture.KindHTTPS {
-				if e.MITMDecrypted {
+				switch {
+				case e.MITMDecrypted:
 					renderMiniTag(c, "已解密", p.success, p.successSoft)
-				} else {
+				case isConnectFailedBeforeTLS(e):
+					renderMiniTag(c, "连接失败", p.danger, p.dangerSoft)
+				default:
 					renderMiniTag(c, "TLS 透传", p.textMuted, p.pillBg)
 				}
 			}
@@ -784,10 +787,24 @@ func (vm *captureViewModel) renderHTTPOverviewTab(c *ui.Context, p palette, e ca
 	vm.renderKVSection(c, p, "请求概览", rows, "")
 }
 
+// isConnectFailedBeforeTLS 判断记录是否在建立上游连接阶段（TLS 握手之前）即已失败。
+func isConnectFailedBeforeTLS(e capture.Entry) bool {
+	return e.Error != "" && !e.MITMDecrypted && e.URL == "" &&
+		e.TLSSNI == "" && e.TLSVersion == "" &&
+		e.BytesSent == 0 && e.BytesRecv == 0
+}
+
 func (vm *captureViewModel) renderOpaqueTLSDetail(c *ui.Context, p palette, e capture.Entry) {
 	ui.Scroll(c.Key("cap-tls-scroll")).Grow(1).MinHeight(0).Margin(0, -6, 0, 0).Children(func() {
 		ui.Column(c).Gap(10).Padding(2, 6, 6, 0).Children(func() {
-			if e.Kind == capture.KindHTTPS {
+			if isConnectFailedBeforeTLS(e) {
+				ui.Column(c).Padding(10, 12).Gap(5).Radius(10).
+					Background(p.warningSoft).Border(1, p.warning).Children(func() {
+					ui.Text(c, "连接在建立上游隧道阶段失败，尚未进入 TLS 握手与解密").FontSize(12).Bold().TextColor(p.warning)
+					ui.Text(c, "若目标站点需走代理（例如境外站点在规则模式下误命中直连导致超时），可点击上方「加代理」将其加入代理规则，或尝试切换代理节点后重试。").
+						FontSize(11).TextColor(p.textSecondary).Wrap()
+				})
+			} else if e.Kind == capture.KindHTTPS {
 				ui.Column(c).Padding(10, 12).Gap(7).Radius(10).
 					Background(p.accentSoft).Border(1, p.borderStrong).Children(func() {
 					ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {

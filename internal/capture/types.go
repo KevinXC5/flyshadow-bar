@@ -18,7 +18,7 @@ import (
 
 const (
 	// DefaultMaxEntries 是内存环形缓冲默认保留的最大抓包记录条数（不落盘）。
-	DefaultMaxEntries = 500
+	DefaultMaxEntries = 2000
 	// DefaultMaxBodyBytes 是单条请求/响应 Body 的最大捕获字节数，超出部分截断防内存膨胀。
 	DefaultMaxBodyBytes = 256 * 1024
 	// maxUDPSamplesPerEntry 是单条 UDP 会话保留的最近数据报样本上限。

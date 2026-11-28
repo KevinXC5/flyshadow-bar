@@ -34,10 +34,11 @@ type mockCore struct {
 	ruleCount    int
 	upload       int64
 	download     int64
-	delayResults map[int]int64
-	delaySeq     map[int][]int64
-	delayCalls   map[int]int
-	conns        []core.ConnectionInfo
+	delayResults   map[int]int64
+	delaySeq       map[int][]int64
+	delayCalls     map[int]int
+	conns          []core.ConnectionInfo
+	closedConnKeys []string
 }
 
 func (m *mockCore) LibPath() string                   { return "/mock/libflyshadow_core_lib.dylib" }
@@ -163,8 +164,12 @@ func (m *mockCore) TunnelConnections() ([]core.ConnectionInfo, error) {
 		{Protocol: "TCP", SourceAddr: "127.0.0.1", SourcePort: 50001, TargetAddr: "openai.com", TargetPort: 443, ProxyType: "Proxy", ActiveTime: 100},
 	}, nil
 }
-func (m *mockCore) CloseConnection(string) {}
-func (m *mockCore) Close()                 { m.CloseTunnel() }
+func (m *mockCore) CloseConnection(key string) {
+	m.mu.Lock()
+	m.closedConnKeys = append(m.closedConnKeys, key)
+	m.mu.Unlock()
+}
+func (m *mockCore) Close() { m.CloseTunnel() }
 
 type mockSysProxy struct {
 	mu      sync.Mutex
@@ -1149,9 +1154,13 @@ func TestEngineCaptureProxyLifecycleAndMITMWhitelist(t *testing.T) {
 	}
 	mc.mu.Lock()
 	corePortWhileCapture := mc.proxyPort
+	closedKeys := append([]string(nil), mc.closedConnKeys...)
 	mc.mu.Unlock()
 	if corePortWhileCapture != st.CoreInternalPort {
 		t.Fatalf("expected core proxy on internal port %d, got %d", st.CoreInternalPort, corePortWhileCapture)
+	}
+	if len(closedKeys) == 0 || closedKeys[0] != "127.0.0.1:50001===TCP" {
+		t.Fatalf("expected pre-capture core connections to be closed on enable, got %v", closedKeys)
 	}
 
 	// 2. 开启白名单 MITM 并增删域名，验证持久化且不覆盖 ThemeMode

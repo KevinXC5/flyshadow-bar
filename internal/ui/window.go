@@ -498,33 +498,104 @@ func (vm *viewModel) renderCompactOverview(c *ui.Context, p palette) {
 		// 第三行：代理模式三等分切换栏
 		vm.renderModeBar(c, p, snap.ModeCode)
 
-		// 第四行：2×2 紧凑快捷开关（系统代理 / TUN 模式 / UDP 加速 / 原生 UDP）
-		ui.Column(c).Gap(5).Children(func() {
-			ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
-				sysOn := snap.SystemProxy
-				vm.renderQuickToggle(c, p, "qt-sysproxy", "系统代理", &sysOn, func(v bool) {
-					vm.runAsync(func() error { return vm.app.eng.SetSystemProxy(v) }, toggleToast("系统代理", v))
-				})
-				tunOn := snap.TunActive
-				tunLabel := "TUN 模式"
-				if snap.TunStarting || vm.tunBusy {
-					tunLabel = "TUN 启动中…"
-				} else if snap.TunActive && snap.TunDevice != "" {
-					tunLabel = "TUN · " + snap.TunDevice
-				}
-				vm.renderQuickToggle(c, p, "qt-tun", tunLabel, &tunOn, func(v bool) {
-					vm.requestToggleTun(v)
-				})
+		// 第四行：一行 4 联单行横向居中快捷卡片（各自专属高亮色，开启高亮、关闭置灰）
+		isDark := c.Theme().Dark
+		tileColor := func(darkHex, lightHex string, darkAlpha, lightAlpha float32) (ui.Color, ui.Color) {
+			if isDark {
+				col := ui.Hex(darkHex)
+				return col, col.Alpha(darkAlpha)
+			}
+			col := ui.Hex(lightHex)
+			return col, col.Alpha(lightAlpha)
+		}
+		sysColor, sysSoft := tileColor("#60a5fa", "#2563eb", 0.15, 0.10)       // 靛蓝
+		tunColor, tunSoft := tileColor("#fbbf24", "#d97706", 0.14, 0.11)       // 琥珀橙
+		udpColor, udpSoft := tileColor("#34d399", "#059669", 0.14, 0.10)       // 翡翠绿
+		nativeColor, nativeSoft := tileColor("#a78bfa", "#7c3aed", 0.15, 0.10) // 紫罗兰
+
+		ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
+			sysTip := "点击开启系统代理（HTTP / HTTPS / SOCKS5）"
+			if snap.SystemProxy {
+				sysTip = fmt.Sprintf("系统代理已开启 (127.0.0.1:%d)，点击关闭", snap.ProxyPort)
+			}
+			vm.renderQuickTile(c, p, quickTileSpec{
+				key:         "qt-sysproxy",
+				label:       "系统代理",
+				tooltip:     sysTip,
+				icon:        svgWideSysProxy,
+				active:      snap.SystemProxy,
+				activeColor: sysColor,
+				activeSoft:  sysSoft,
+				onClick: func() {
+					next := !snap.SystemProxy
+					vm.runAsync(func() error { return vm.app.eng.SetSystemProxy(next) }, toggleToast("系统代理", next))
+				},
 			})
-			ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
-				udpOn := snap.UDPAccelerationEnabled
-				vm.renderQuickToggle(c, p, "qt-udp", "UDP 加速", &udpOn, func(v bool) {
-					vm.runAsync(func() error { return vm.app.eng.SetUDPAcceleration(v) }, toggleToast("UDP 加速 (QUIC)", v))
-				})
-				nativeOn := snap.NativeUDP
-				vm.renderQuickToggle(c, p, "qt-native", "原生 UDP", &nativeOn, func(v bool) {
-					vm.runAsync(func() error { return vm.app.eng.SetNativeUDP(v) }, toggleToast("原生 UDP", v))
-				})
+
+			tunBusy := snap.TunStarting || vm.tunBusy
+			tunLabel := "TUN 模式"
+			tunTip := "点击开启 TUN 虚拟网卡，接管全机 TCP / UDP 流量"
+			if tunBusy {
+				tunLabel = "启动中…"
+				tunTip = "正在初始化 TUN 虚拟网卡…"
+			} else if snap.TunActive {
+				if snap.TunDevice != "" {
+					tunTip = fmt.Sprintf("TUN 已开启（%s），点击关闭", snap.TunDevice)
+				} else {
+					tunTip = "TUN 虚拟网卡已开启，点击关闭"
+				}
+			}
+			vm.renderQuickTile(c, p, quickTileSpec{
+				key:         "qt-tun",
+				label:       tunLabel,
+				tooltip:     tunTip,
+				icon:        svgWideTun,
+				active:      snap.TunActive,
+				loading:     tunBusy,
+				activeColor: tunColor,
+				activeSoft:  tunSoft,
+				onClick: func() {
+					if tunBusy {
+						return
+					}
+					vm.requestToggleTun(!snap.TunActive)
+				},
+			})
+
+			udpTip := "点击开启 UDP 加速（QUIC 传输）"
+			if snap.UDPAccelerationEnabled {
+				udpTip = "UDP 加速 (QUIC) 已开启，点击关闭"
+			}
+			vm.renderQuickTile(c, p, quickTileSpec{
+				key:         "qt-udp",
+				label:       "UDP 加速",
+				tooltip:     udpTip,
+				icon:        svgWideUDPBoost,
+				active:      snap.UDPAccelerationEnabled,
+				activeColor: udpColor,
+				activeSoft:  udpSoft,
+				onClick: func() {
+					next := !snap.UDPAccelerationEnabled
+					vm.runAsync(func() error { return vm.app.eng.SetUDPAcceleration(next) }, toggleToast("UDP 加速 (QUIC)", next))
+				},
+			})
+
+			nativeTip := "点击开启原生 UDP 转发"
+			if snap.NativeUDP {
+				nativeTip = "原生 UDP 转发已开启，点击关闭"
+			}
+			vm.renderQuickTile(c, p, quickTileSpec{
+				key:         "qt-native",
+				label:       "原生 UDP",
+				tooltip:     nativeTip,
+				icon:        svgWideNativeUDP,
+				active:      snap.NativeUDP,
+				activeColor: nativeColor,
+				activeSoft:  nativeSoft,
+				onClick: func() {
+					next := !snap.NativeUDP
+					vm.runAsync(func() error { return vm.app.eng.SetNativeUDP(next) }, toggleToast("原生 UDP", next))
+				},
 			})
 		})
 	})
@@ -1101,20 +1172,79 @@ func (vm *viewModel) renderModeBar(c *ui.Context, p palette, active core.ProxyMo
 	})
 }
 
-func (vm *viewModel) renderQuickToggle(c *ui.Context, p palette, key, label string, val *bool, onToggle func(bool)) {
+type quickTileSpec struct {
+	key         string
+	label       string
+	tooltip     string
+	icon        *ui.SVG
+	active      bool
+	loading     bool
+	activeColor ui.Color
+	activeSoft  ui.Color
+	onClick     func()
+}
+
+// renderQuickTile 绘制宽幅矢量图 + 居中文字快捷功能卡片：
+// 上半部使用 88x26 横向宽幅功能图形铺满视觉区，下方文字居中对齐；开启点亮专属色，关闭沉静置灰。
+func (vm *viewModel) renderQuickTile(c *ui.Context, p palette, spec quickTileSpec) {
 	bg := p.cardElevated
 	bdr := p.border
-	if *val {
-		bg = p.accentSoft
-		bdr = p.borderStrong
+	iconColor := p.textMuted.Alpha(0.75)
+	labelColor := p.textMuted
+
+	if spec.active {
+		bg = spec.activeSoft
+		bdr = spec.activeColor.Alpha(0.55)
+		iconColor = spec.activeColor
+		labelColor = p.text
+	} else if spec.loading {
+		bg = p.cardElevated
+		bdr = spec.activeColor.Alpha(0.45)
+		iconColor = spec.activeColor
+		labelColor = p.textSecondary
 	}
-	ui.Row(c.Key(key)).Grow(1).Padding(5, 8).Radius(8).Background(bg).Border(1, bdr).
-		AlignItems(ui.Center).Gap(5).Children(func() {
-		ui.Text(c, label).Grow(1).FontSize(11).TextColor(p.text).NoWrap()
-		if ui.Switch(c.Key(key+"-sw"), val).Cursor(ui.CursorPointer).Changed() {
-			onToggle(*val)
+
+	tile := ui.Column(c.Key(spec.key)).Grow(1).MinWidth(0).
+		Padding(6, 6, 6, 6).Gap(4).Radius(9.5).
+		Background(bg).Border(1, bdr).
+		AlignItems(ui.Stretch).
+		Cursor(ui.CursorPointer).Label(spec.label).Tooltip(spec.tooltip)
+
+	if spec.active {
+		tile.Shadow(0, 1, 6, 0, spec.activeColor.Alpha(0.14))
+	}
+	if tile.Hovered() {
+		if spec.active {
+			tile.Background(spec.activeColor.Alpha(0.22)).Border(1, spec.activeColor.Alpha(0.75))
+		} else {
+			tile.Background(p.cardHover).Border(1, p.borderStrong)
+			iconColor = p.textSecondary
+			labelColor = p.textSecondary
 		}
+	}
+
+	tile.Children(func() {
+		// 上半部：宽幅矢量图形直接铺满横向视觉区（无套娃色块框）
+		ui.Box(c).Height(26).Center().Children(func() {
+			if spec.loading {
+				ui.Spinner(c).Size(14, 14)
+			} else if spec.icon != nil {
+				ui.Icon(c, spec.icon).Size(88, 26).TextColor(iconColor)
+			}
+		})
+
+		// 下半部：文字水平居中对齐
+		ui.Row(c).Center().Children(func() {
+			txt := ui.Text(c, spec.label).FontSize(11).TextColor(labelColor).NoWrap()
+			if spec.active {
+				txt.Bold()
+			}
+		})
 	})
+
+	if tile.Clicked() && spec.onClick != nil {
+		spec.onClick()
+	}
 }
 
 func (vm *viewModel) renderNodesView(c *ui.Context, p palette) {
