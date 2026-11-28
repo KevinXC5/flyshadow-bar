@@ -299,6 +299,16 @@ func (tc *trayController) patchMenuInPlaceForOS(snap engine.Snapshot, goos strin
 	if item := tc.menu.ItemByID("toggle-sysproxy"); item != nil {
 		changes += setMenuItemChecked(item, snap.SystemProxy)
 	}
+	if item := tc.menu.ItemByID("toggle-tun"); item != nil {
+		changes += setMenuItemChecked(item, snap.TunActive)
+		if snap.TunStarting {
+			changes += setMenuItemLabel(item, "TUN 模式（启动中…）")
+			changes += setMenuItemEnabled(item, false)
+		} else {
+			changes += setMenuItemLabel(item, "TUN 模式")
+			changes += setMenuItemEnabled(item, true)
+		}
+	}
 	if item := tc.menu.ItemByID("toggle-udp"); item != nil {
 		changes += setMenuItemChecked(item, snap.UDPAccelerationEnabled)
 	}
@@ -560,6 +570,18 @@ func (tc *trayController) buildMenuForOS(snap engine.Snapshot, goos string) *myg
 			},
 		},
 		&mygo.MenuItem{
+			ID:       "toggle-tun",
+			Label:    tunMenuLabel(snap),
+			Type:     mygo.MenuItemCheckbox,
+			Checked:  snap.TunActive,
+			Disabled: snap.TunStarting,
+			KeepOpen: true,
+			Click: func(item *mygo.MenuItem, _ *mygo.Window) {
+				next := item.Checked
+				go func() { _ = tc.app.eng.SetTunEnabled(next) }()
+			},
+		},
+		&mygo.MenuItem{
 			ID:       "toggle-udp",
 			Label:    "UDP 加速 (QUIC)",
 			Type:     mygo.MenuItemCheckbox,
@@ -653,6 +675,13 @@ func (tc *trayController) buildMenuForOS(snap engine.Snapshot, goos string) *myg
 	)
 
 	return mygo.NewMenu(items)
+}
+
+func tunMenuLabel(snap engine.Snapshot) string {
+	if snap.TunStarting {
+		return "TUN 模式（启动中…）"
+	}
+	return "TUN 模式"
 }
 
 func statusHeaderLabel(snap engine.Snapshot) string {

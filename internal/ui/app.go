@@ -201,6 +201,10 @@ func (a *App) onReady(opts RunOptions) {
 			if a.win != nil && a.win.IsVisible() {
 				a.win.Invalidate()
 			}
+			if a.captureWin != nil && a.captureWin.IsVisible() && a.captureVM != nil && a.eng != nil {
+				a.captureVM.status = a.eng.CaptureStatus()
+				a.captureWin.Invalidate()
+			}
 		})
 	})
 
@@ -474,7 +478,7 @@ func shouldHideOnBlur(quitting, pinWindow, visible bool, vm *viewModel) bool {
 	if quitting || pinWindow || !visible {
 		return false
 	}
-	if vm != nil && (vm.updateDownloading || vm.subModalOpen || vm.subSaving || vm.activeRulesModal.open) {
+	if vm != nil && (vm.updateDownloading || vm.subModalOpen || vm.subSaving || vm.activeRulesModal.open || vm.tunModalOpen || vm.tunBusy) {
 		return false
 	}
 	return true

@@ -23,6 +23,8 @@ const (
 	DarwinJarEntry      = "darwin-aarch64/libflyshadow_core_lib.dylib"
 	DarwinAMD64JarEntry = "darwin-x86-64/libflyshadow_core_lib.dylib"
 	WindowsJarEntry     = "win32-x86-64/flyshadow_core_lib.dll"
+	WinTunDLLName       = "wintun.dll"
+	WinTunJarEntry      = "win32-x86-64/wintun.dll"
 )
 
 var (
@@ -213,6 +215,78 @@ func locateWindowsCoreLib() (string, error) {
 	}
 
 	return "", fmt.Errorf("未找到 %s（已检查程序目录、%%USERPROFILE%%\\.flyshadowbar、FlyShadow 常见安装目录与 %%USERPROFILE%%\\.FlyShadow\\lib）", WindowsLibName)
+}
+
+func winTunJarEntries() []string {
+	return []string{
+		WinTunJarEntry,
+		"win32-x86_64/" + WinTunDLLName,
+		WinTunDLLName,
+	}
+}
+
+// LocateWinTunDLL 按优先级查找 Windows 平台所需的 wintun.dll，必要时自动从官方 JAR 提取缓存。
+func LocateWinTunDLL() (string, error) {
+	if envPath := strings.TrimSpace(os.Getenv("FLYSHADOW_WINTUN_DLL")); envPath != "" {
+		if isRegularFile(envPath) {
+			return envPath, nil
+		}
+		return "", fmt.Errorf("环境变量 FLYSHADOW_WINTUN_DLL 指向的文件不存在: %s", envPath)
+	}
+
+	// 1. 程序同级目录
+	for _, dir := range executableDirsFinder() {
+		p := filepath.Join(dir, WinTunDLLName)
+		if isRegularFile(p) {
+			return p, nil
+		}
+	}
+
+	// 2. ~/.flyshadowbar/lib 显式覆盖
+	if dir, err := config.DefaultDir(); err == nil {
+		if p := filepath.Join(dir, WinTunDLLName); isRegularFile(p) {
+			return p, nil
+		}
+		if p := filepath.Join(dir, "lib", WinTunDLLName); isRegularFile(p) {
+			return p, nil
+		}
+		if p, ok := findLatestVersionedLib(filepath.Join(dir, "lib"), WinTunDLLName); ok {
+			return p, nil
+		}
+	}
+
+	// 3. 优先从官方 JAR 提取 win32-x86-64/wintun.dll 并按内容指纹缓存
+	for _, jarPath := range officialJarsFinder() {
+		if extracted, err := extractFirstFromJarCached(jarPath, winTunJarEntries(), WinTunDLLName); err == nil {
+			return extracted, nil
+		}
+	}
+
+	// 4. Windows 常见安装目录
+	for _, dir := range windowsInstallDirsFinder() {
+		for _, sub := range []string{"", "app", "lib", "resources"} {
+			p := filepath.Join(dir, sub, WinTunDLLName)
+			if isRegularFile(p) {
+				return p, nil
+			}
+		}
+	}
+
+	// 5. 只读兼容原版 ~/.FlyShadow/lib
+	if legacyDir, err := legacyDirResolver(); err == nil {
+		if p, ok := findLatestVersionedLib(filepath.Join(legacyDir, "lib"), WinTunDLLName); ok {
+			return p, nil
+		}
+	}
+
+	// 6. 兜底复用缓存目录中的 wintun.dll
+	if cacheDir, err := config.CacheDir(); err == nil {
+		if p := filepath.Join(cacheDir, WinTunDLLName); isRegularFile(p) {
+			return p, nil
+		}
+	}
+
+	return "", fmt.Errorf("未找到 %s（请确保已安装官方 FlyShadow 客户端，或将 wintun.dll 放置在程序目录或 %%USERPROFILE%%\\.flyshadowbar\\lib）", WinTunDLLName)
 }
 
 func executableCandidateDirs() []string {

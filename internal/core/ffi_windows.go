@@ -34,6 +34,7 @@ type NativeClient struct {
 	pSetIPv6Enable         *windows.Proc
 	pSetUseBuildInDNS      *windows.Proc
 	pSetDirectConnPriority *windows.Proc
+	pSetTunModeEnable      *windows.Proc
 	pClearDomainRule       *windows.Proc
 	pSetDomainRuleObj      *windows.Proc
 	pSetGeoIP              *windows.Proc
@@ -123,6 +124,10 @@ func Open(libPath string) (Client, error) {
 			return nil, err
 		}
 		*item.dst = p
+	}
+	// 可选符号：兼容不同版本官方核心库。
+	if p, optErr := dll.FindProc("set_tun_mode_enable"); optErr == nil {
+		c.pSetTunModeEnable = p
 	}
 
 	return c, nil
@@ -217,6 +222,14 @@ func (c *NativeClient) SetDirectConnPriority(enabled bool, timeoutMs int64) {
 		return
 	}
 	c.pSetDirectConnPriority.Call(uintptr(rt), uintptr(tc), boolToUintptr(enabled), uintptr(timeoutMs))
+}
+
+func (c *NativeClient) SetTunModeEnable(enabled bool) {
+	rt, tc := c.handles()
+	if rt == 0 || tc == 0 || c.pSetTunModeEnable == nil {
+		return
+	}
+	c.pSetTunModeEnable.Call(uintptr(rt), uintptr(tc), boolToUintptr(enabled))
 }
 
 func (c *NativeClient) ClearDomainRules() {

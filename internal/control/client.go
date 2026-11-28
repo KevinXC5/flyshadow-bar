@@ -99,6 +99,14 @@ func (c *Client) SetSysProxy(ctx context.Context, action string) (*engine.Snapsh
 	return &snap, nil
 }
 
+func (c *Client) SetTun(ctx context.Context, action string) (*engine.Snapshot, error) {
+	var snap engine.Snapshot
+	if err := c.do(ctx, http.MethodPost, "/api/v1/tun", toggleRequest{Action: action}, &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
 func (c *Client) SysProxyServices(ctx context.Context) (*engine.SysProxyServicesState, error) {
 	var state engine.SysProxyServicesState
 	if err := c.do(ctx, http.MethodGet, "/api/v1/sysproxy/services", nil, &state); err != nil {

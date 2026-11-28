@@ -21,6 +21,10 @@ type CaptureStatus struct {
 	MITMHosts        []string           `json:"mitmHosts,omitempty"`
 	Cert             capture.CertStatus `json:"cert"`
 	EntryCount       int                `json:"entryCount"`
+	TunActive        bool               `json:"tunActive"`
+	TunStarting      bool               `json:"tunStarting"`
+	TunDevice        string             `json:"tunDevice,omitempty"`
+	TunLastError     string             `json:"tunLastError,omitempty"`
 }
 
 // CaptureStore 返回内存抓包记录仓库，供独立抓包分析窗口订阅与展示。
@@ -38,7 +42,21 @@ func (e *Engine) CaptureStatus() CaptureStatus {
 	mitmHosts := append([]string(nil), e.mitmHosts...)
 	certCached := e.certStatusCached
 	certStatus := e.certStatus
+	tunMgr := e.tunMgr
+	tunStarting := e.tunStarting
+	tunLastErr := e.tunLastError
 	e.mu.RUnlock()
+
+	var tunActive bool
+	var tunDev string
+	if tunMgr != nil {
+		tst := tunMgr.Status()
+		tunActive = tst.Active
+		tunDev = tst.DeviceName
+		if tunLastErr == "" {
+			tunLastErr = tst.LastError
+		}
+	}
 
 	if !certCached && e.captureCA != nil {
 		certStatus = e.captureCA.Status()
@@ -57,6 +75,10 @@ func (e *Engine) CaptureStatus() CaptureStatus {
 		MITMHosts:        mitmHosts,
 		Cert:             certStatus,
 		EntryCount:       e.captureStore.Len(),
+		TunActive:        tunActive,
+		TunStarting:      tunStarting,
+		TunDevice:        tunDev,
+		TunLastError:     tunLastErr,
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
 	"github.com/KevinXC5/flyshadow-bar/internal/sysproxy"
+	"github.com/KevinXC5/flyshadow-bar/internal/tun"
 	"github.com/KevinXC5/flyshadow-bar/internal/version"
 )
 
@@ -124,6 +125,14 @@ type Snapshot struct {
 	PingCompleted          int                     `json:"pingCompleted"`
 	PingTotal              int                     `json:"pingTotal"`
 	CaptureEnabled         bool                    `json:"captureEnabled"`
+	TunEnabled             bool                    `json:"tunEnabled"`
+	TunActive              bool                    `json:"tunActive"`
+	TunStarting            bool                    `json:"tunStarting"`
+	TunDevice              string                  `json:"tunDevice,omitempty"`
+	TunOutboundIface       string                  `json:"tunOutboundIface,omitempty"`
+	TunRouteCount          int                     `json:"tunRouteCount,omitempty"`
+	TunScopedTestMode      bool                    `json:"tunScopedTestMode,omitempty"`
+	TunLastError           string                  `json:"tunLastError,omitempty"`
 	Nodes                  []NodeSnapshot          `json:"nodes"`
 	UpdatedAt              int64                   `json:"updatedAt"`
 }
@@ -137,6 +146,7 @@ type Options struct {
 	CloudClient         cloud.SyncAPI
 	AutoConnect         bool
 	DisableAutoSysProxy bool
+	TunOpenDevice       func(tun.DeviceConfig) (tun.PacketDevice, error)
 }
 
 // Engine 统一管理配置、底层核心库生命周期、代理、隧道、系统代理与实时统计。
@@ -207,6 +217,12 @@ type Engine struct {
 	captureProcMap   map[string]string
 	captureProcAt    time.Time
 
+	// TUN 虚拟网卡模式状态
+	tunMgr        *tun.Manager
+	tunStarting   bool
+	tunLastError  string
+	tunOpenDevice func(tun.DeviceConfig) (tun.PacketDevice, error)
+
 	sysProxyCheckInterval    time.Duration
 	connectPollInterval      time.Duration
 	connectPollAttempts      int
@@ -252,6 +268,7 @@ func New(opts Options) (*Engine, error) {
 		cfg:                 cfg,
 		prefsPath:           config.PrefsPathForConfig(cfg.Path),
 		disableAutoSysProxy: opts.DisableAutoSysProxy,
+		tunOpenDevice:       opts.TunOpenDevice,
 		state:               StateDisconnected,
 		delays:              make(map[int]int64),
 		testingNodes:        make(map[int]bool),
@@ -351,6 +368,15 @@ func (e *Engine) Start(autoConnect bool) error {
 				log.Printf("[engine] 启动自动开启系统代理失败 (127.0.0.1:%d): %v", port, err)
 			}
 		}
+		// 若配置开启了 TUN 模式且当前进程已具备免弹窗权限（如 Windows 管理员重启后或 root 运行），自动拉起 TUN
+		e.mu.RLock()
+		autoTun := e.cfg.TunModelEnable && !e.disableAutoSysProxy && (tun.IsAdmin() || e.tunOpenDevice != nil)
+		e.mu.RUnlock()
+		if autoTun {
+			if err := e.enableTunLocked(false); err != nil {
+				log.Printf("[engine] 启动自动开启 TUN 模式失败: %v", err)
+			}
+		}
 		// 首次建连后若配置包含订阅凭据且距上次同步超过 5 分钟，后台静默刷新流量、到期时间、节点与云端规则
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
@@ -382,6 +408,9 @@ func (e *Engine) Shutdown() {
 		e.tunnelOpInProgress = false
 		e.mu.Unlock()
 	}()
+
+	// 退出时最先关闭 TUN 虚拟网卡并还原系统路由，防止残留死路由导致断网
+	e.stopTunForShutdownLocked()
 
 	// 退出时自动关闭系统代理，避免系统断网
 	if e.sysProxy != nil {
@@ -513,6 +542,21 @@ func (e *Engine) Snapshot() Snapshot {
 	copy(speedHist, e.speedHistory)
 
 	mode := core.ProxyMode(cfg.ProxyType)
+	var tunActive, tunScoped bool
+	var tunDev, tunOut string
+	var tunRoutes int
+	tunErr := e.tunLastError
+	if e.tunMgr != nil {
+		tst := e.tunMgr.Status()
+		tunActive = tst.Active
+		tunDev = tst.DeviceName
+		tunOut = tst.OutboundIface
+		tunRoutes = tst.RouteCount
+		tunScoped = tst.ScopedTestMode
+		if tunErr == "" {
+			tunErr = tst.LastError
+		}
+	}
 	return Snapshot{
 		AppVersion:             version.Version,
 		CoreVersion:            e.core.Version(),
@@ -557,6 +601,14 @@ func (e *Engine) Snapshot() Snapshot {
 		PingCompleted:          e.pingCompleted,
 		PingTotal:              e.pingTotal,
 		CaptureEnabled:         e.captureEnabled,
+		TunEnabled:             cfg.TunModelEnable,
+		TunActive:              tunActive,
+		TunStarting:            e.tunStarting,
+		TunDevice:              tunDev,
+		TunOutboundIface:       tunOut,
+		TunRouteCount:          tunRoutes,
+		TunScopedTestMode:      tunScoped,
+		TunLastError:           tunErr,
 		Nodes:                  nodeSnaps,
 		UpdatedAt:              time.Now().UnixMilli(),
 	}
@@ -626,6 +678,7 @@ func (e *Engine) SelectNode(nodeID int) error {
 		return fmt.Errorf("保存选中节点失败: %w", saveErr)
 	}
 
+	e.syncTunBypassForHost(target.Host)
 	return e.connectCurrentLocked()
 }
 

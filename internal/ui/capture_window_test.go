@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -105,4 +106,35 @@ func TestCaptureWindowRendersHTTPAndUDPAndCertSafetyModal(t *testing.T) {
 	// 打开自签证书与白名单安全引导弹窗
 	vm.certModalOpen = true
 	tester.Frame()
+
+	// 关闭证书弹窗并打开抓包窗口内的 TUN 二次确认弹窗
+	vm.certModalOpen = false
+	vm.tunModalOpen = true
+	tester.Frame()
+	if !tester.HasText("捕获全部流量需先开启 TUN 模式") || !tester.HasText("确认并开启 TUN") {
+		t.Fatalf("expected capture TUN confirm modal texts, got %v", tester.Texts())
+	}
+
+	// 切换到 TUN 已激活态渲染管理弹窗
+	vm.status.TunActive = true
+	vm.status.TunDevice = "utun8"
+	tester.Frame()
+	if !tester.HasText("全机流量抓包已启用（TUN 模式）") || !tester.HasText("关闭 TUN（切回仅代理抓包）") {
+		t.Fatalf("expected active TUN modal texts, got %v", tester.Texts())
+	}
+}
+
+func TestTunSafetyBulletsPlatformLocalization(t *testing.T) {
+	winBullets := strings.Join(tunSafetyBullets("windows", true), "\n")
+	if !strings.Contains(winBullets, "Wintun") || !strings.Contains(winBullets, "UAC") {
+		t.Fatalf("expected Windows TUN bullets to mention Wintun/UAC, got: %s", winBullets)
+	}
+	if strings.Contains(winBullets, "macOS") || strings.Contains(winBullets, "utun") {
+		t.Fatalf("Windows TUN bullets must not contain macOS terms: %s", winBullets)
+	}
+
+	macBullets := strings.Join(tunSafetyBullets("darwin", false), "\n")
+	if !strings.Contains(macBullets, "utun") || !strings.Contains(macBullets, "100.64.0.0/10") {
+		t.Fatalf("expected macOS TUN bullets to mention utun and 100.64.0.0/10 protection, got: %s", macBullets)
+	}
 }

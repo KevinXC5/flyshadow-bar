@@ -32,9 +32,10 @@
   - `internal/cliinstall`：跨平台命令行工具 `fsbar` 自动链接/注册到系统 `PATH` 目录与冲突保护。
   - `internal/cloud`：官方云端订阅与自定义分流规则双向同步客户端（DoH TXT 发现、代理/直连自动回退、凭据脱敏）。
   - `internal/config`：独立主目录 `~/.flyshadowbar` 管理与旧目录无损迁移、无损配置加载/保存、节点匹配、13 种官方分流规则与自定义规则 CRUD、客户端独立偏好 `flyshadow-bar.prefs.json`。
-  - `internal/core`：零 CGO FFI 绑定（macOS `purego`、Windows `golang.org/x/sys/windows`）、核心动态库与 GeoIP 自动定位及 JAR 解压缓存。
+  - `internal/core`：零 CGO FFI 绑定（macOS `purego`、Windows `golang.org/x/sys/windows`）、核心动态库、GeoIP 与 Windows `wintun.dll` 自动定位及 JAR 解压缓存。
   - `internal/sysproxy`：跨平台系统代理（macOS `networksetup`、Windows 注册表 + `wininet.dll`）。
-  - `internal/engine`：单进程运行时引擎（隧道热切换、规则热重载不中断隧道、并发测速、1s 流量采样、连接监控、启动自动代理与退出清理）。
+  - `internal/tun`：零 CGO 跨平台 TUN 虚拟网卡引擎（macOS 原生 `utun` + 内置 `fsbar tun-helper` 提权与父进程存活看门狗、Windows 动态加载 `wintun.dll` + UAC 提权检测与重启、`gvisor.dev/gvisor` 纯 Go TCP/IP 协议栈、首包 TLS SNI / HTTP Host / DNS 反查与本地回环 SOCKS5 转发、非破坏性分片路由与 `100.64.0.0/10` 等远程隧道保护）。
+  - `internal/engine`：单进程运行时引擎（隧道热切换、TUN 模式生命周期与节点豁免路由联动、抓包前置代理热切换、规则热重载不中断隧道、并发测速、1s 流量采样、连接监控、启动自动代理与退出清理）。
   - `internal/control`：仅监听 `127.0.0.1:0` 的随机端口 + 随机 Bearer Token 本地 HTTP 控制服务与客户端。
   - `internal/updater`：GitHub Releases 版本检测、SemVer 比较与按平台挑选产物下载。
   - `internal/ui`：MyGo 原生主窗口、独立宽屏抓包分析窗口、托盘菜单、图标、增量更新管理器与视图（`app.go`、`tray.go`、`updates.go`、`window.go`、`capture_window.go`、`rules_view.go`、`conns_view.go`）。
@@ -53,7 +54,8 @@
 - `start_proxy`（`allowLanConnection=true`）、`start_proxy_ip("127.0.0.1", ...)`（`false`）、`get_version`、`get_tunnel_mapper_info_json` 返回的 C 字符串必须调用 `free_string` 释放；指针转换必须通过 `go vet`（双平台不得出现 `unsafeptr` 警告）。
 - `close_connect` 的连接键格式固定为 `source_addr:source_port===protocol`。
 - 传输层开关决策保持与官方一致：`enableQuic = udpAccelerationEnabled && (node.enableQuic == 1)`，`enableNativeUdp = nativeUdp && (node.nativeUdp == 1)`。
-- `config.json` 必须通过 `map[string]json.RawMessage` 无损原子写回（先写临时文件再 `rename`），严禁丢失官方未建模字段（如账号 token、订阅密码等）；仅本客户端使用的外观/偏好配置一律写入同目录 `flyshadow-bar.prefs.json`。
+- `config.json` 必须通过 `map[string]json.RawMessage` 无损原子写回（先写临时文件再 `rename`），严禁丢失官方未建模字段（如账号 token、订阅密码等）；兼容同步 `tunModelEnable` 字段；仅本客户端使用的外观/偏好配置一律写入同目录 `flyshadow-bar.prefs.json`。
+- TUN 模式启动前必须调用可选核心库符号 `set_tun_mode_enable(rt, tc, true)` 启用底层物理网卡绑定防回环（关闭或失败回滚为 `false`）；路由表必须使用非破坏性分片路由（绝不删除原 `default` 路由），显式豁免私网段、节点 `/32` 以及 `100.64.0.0/10` 等远程隧道网段，且退出或父进程崩溃时必须自动清理全部新增路由；宿主机实测 TUN 时须通过 `FLYSHADOW_TUN_TEST_CIDRS` 或 `CustomRouteCIDRs` 严格限定隔离保留网段（如 `198.18.10.0/24`），不得影响远程管理连接。
 - 自定义规则完整兼容官方 `customRuleList`、`customRuleActiveLabels`（含 `__DEFAULT__`）、13 种 `matching`（`0~12`）与 3 种 `proxyType`（`0=Direct, 1=Reject, 2=Proxy`），增删改启停后只重载规则，不得断开当前隧道。
 - 即时模式（MyGo UI）约束：控件跨帧状态不要保存 `ui.Context` 或 `ui.Element`，异步回调重绘/剪贴板通过 `c.Services()` 触发；不要用 `ui.Tester` 替代真实原生窗口与托盘验收。
 

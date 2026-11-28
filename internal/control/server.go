@@ -109,6 +109,7 @@ func StartServer(eng *engine.Engine, opts ServerOptions) (*Server, error) {
 	mux.HandleFunc("/api/v1/native-udp", s.auth(s.handleNativeUDP))
 	mux.HandleFunc("/api/v1/sysproxy", s.auth(s.handleSysProxy))
 	mux.HandleFunc("/api/v1/sysproxy/services", s.auth(s.handleSysProxyServices))
+	mux.HandleFunc("/api/v1/tun", s.auth(s.handleTun))
 	mux.HandleFunc("/api/v1/ping", s.auth(s.handlePing))
 	mux.HandleFunc("/api/v1/reload", s.auth(s.handleReload))
 	mux.HandleFunc("/api/v1/sync", s.auth(s.handleSync))
@@ -364,6 +365,28 @@ func (s *Server) handleSysProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.eng.Snapshot())
+}
+
+func (s *Server) handleTun(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.eng.Snapshot())
+	case http.MethodPost:
+		var req toggleRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		next, err := resolveToggle(req.Action, s.eng.Snapshot().TunActive)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := s.eng.SetTunEnabled(next); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, s.eng.Snapshot())
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "仅支持 GET/POST"})
+	}
 }
 
 type sysProxyServicesRequest struct {

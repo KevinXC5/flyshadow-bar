@@ -327,6 +327,7 @@ type Config struct {
 	DirectConnPriority        bool
 	DirectConnPriorityTimeout int64
 	AutoSetSysProxyOnStartUp  bool
+	TunModelEnable            bool
 	UUID                      string
 	StarNodeIDList            []int
 
@@ -631,6 +632,7 @@ func Load(path string) (*Config, error) {
 	unmarshalField(raw, "directConnPriority", &cfg.DirectConnPriority)
 	unmarshalField(raw, "directConnPriorityTimeout", &cfg.DirectConnPriorityTimeout)
 	unmarshalField(raw, "autoSetSysProxyOnStartUp", &cfg.AutoSetSysProxyOnStartUp)
+	unmarshalField(raw, "tunModelEnable", &cfg.TunModelEnable)
 	unmarshalField(raw, "uuid", &cfg.UUID)
 	unmarshalField(raw, "starNodeIdList", &cfg.StarNodeIDList)
 
@@ -713,6 +715,9 @@ func (c *Config) Save() error {
 		return err
 	}
 	if err := setRawField(c.raw, "autoSetSysProxyOnStartUp", c.AutoSetSysProxyOnStartUp); err != nil {
+		return err
+	}
+	if err := setRawField(c.raw, "tunModelEnable", c.TunModelEnable); err != nil {
 		return err
 	}
 	starList := c.StarNodeIDList

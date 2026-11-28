@@ -27,6 +27,7 @@ func (s *stubCore) SetNativeUDP(v bool)                           { s.nativeUDP 
 func (s *stubCore) SetIPv6Enable(bool)                            {}
 func (s *stubCore) SetUseBuildInDNS(bool)                         {}
 func (s *stubCore) SetDirectConnPriority(bool, int64)             {}
+func (s *stubCore) SetTunModeEnable(bool)                         {}
 func (s *stubCore) ClearDomainRules()                             {}
 func (s *stubCore) SetDomainRule(string, int32, int32, int32)     {}
 func (s *stubCore) SetGeoIP(string, []byte)                       {}

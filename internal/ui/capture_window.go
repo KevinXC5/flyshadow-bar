@@ -36,6 +36,10 @@ type captureViewModel struct {
 	certActionErr  string
 	mitmHostDraft  string
 	togglingProxy  bool
+	// TUN 全机抓包二次确认弹窗状态
+	tunModalOpen   bool
+	tunBusy        bool
+	tunModalErr    string
 	toastMsg       string
 	toastExpiresAt time.Time
 }
@@ -83,13 +87,23 @@ func (vm *captureViewModel) runAsync(fn func() error, okToast string) {
 func (vm *captureViewModel) render(c *ui.Context) {
 	if vm.app != nil {
 		if c.Shortcut(ui.Cmd, ui.KeyW) {
-			if vm.certModalOpen {
+			if vm.tunModalOpen {
+				if !vm.tunBusy {
+					vm.tunModalOpen = false
+					vm.tunModalErr = ""
+				}
+			} else if vm.certModalOpen {
 				vm.certModalOpen = false
 			} else {
 				vm.app.hideCaptureWindow()
 			}
-		} else if c.Shortcut(0, ui.KeyEscape) && vm.certModalOpen {
-			vm.certModalOpen = false
+		} else if c.Shortcut(0, ui.KeyEscape) {
+			if vm.tunModalOpen && !vm.tunBusy {
+				vm.tunModalOpen = false
+				vm.tunModalErr = ""
+			} else if vm.certModalOpen {
+				vm.certModalOpen = false
+			}
 		}
 	}
 	if vm.toastMsg != "" {
@@ -116,6 +130,7 @@ func (vm *captureViewModel) render(c *ui.Context) {
 	})
 
 	vm.renderCertModal(c, p)
+	vm.renderCaptureTunModal(c, p)
 }
 
 func (vm *captureViewModel) renderHeaderBar(c *ui.Context, p palette) {
@@ -135,7 +150,11 @@ func (vm *captureViewModel) renderHeaderBar(c *ui.Context, p palette) {
 			})
 			ui.Text(c, "抓包分析").FontSize(14).Bold().TextColor(p.text).NoWrap()
 			if st.Enabled {
-				statusText := fmt.Sprintf("录制中 · :%d", st.ProxyPort)
+				scopePrefix := "代理抓包"
+				if st.TunActive {
+					scopePrefix = "全机抓包 (TUN)"
+				}
+				statusText := fmt.Sprintf("%s · :%d", scopePrefix, st.ProxyPort)
 				fg, bg := p.danger, p.dangerSoft
 				if st.Paused {
 					statusText = fmt.Sprintf("已暂停 · :%d", st.ProxyPort)
@@ -234,6 +253,41 @@ func (vm *captureViewModel) renderHeaderBar(c *ui.Context, p palette) {
 			vm.entries = nil
 			vm.selectedID = 0
 			vm.status = vm.app.eng.CaptureStatus()
+		}
+
+		// 捕获范围（代理流量 vs 全机流量 TUN）入口按钮
+		tunText := "抓全部流量 (TUN)"
+		tunTip := "当前仅捕获走本地代理端口的流量；点击开启 TUN 模式以捕获全部应用流量"
+		tunFg, tunBg, tunBorder := p.textSecondary, p.cardElevated, p.border
+		if st.TunActive {
+			if st.TunDevice != "" {
+				tunText = "全部流量 · " + st.TunDevice
+			} else {
+				tunText = "全部流量 (TUN)"
+			}
+			tunTip = "TUN 模式已开启，正在接管全机流量；点击查看或关闭"
+			tunFg, tunBg, tunBorder = p.success, p.successSoft, p.success
+		} else if st.TunStarting || vm.tunBusy {
+			tunText = "TUN 启动中…"
+			tunFg, tunBg, tunBorder = p.warning, p.warningSoft, p.warning
+		}
+		tunBtn := ui.Row(c.Key("cap-tun-btn")).Padding(5, 10).Radius(7.5).
+			Background(tunBg).Border(1, tunBorder).AlignItems(ui.Center).Gap(5).
+			Cursor(ui.CursorPointer).Label("全机抓包 TUN 开关").Tooltip(tunTip)
+		if tunBtn.Hovered() && !st.TunActive {
+			tunBtn.Background(p.cardHover)
+		}
+		tunBtn.Children(func() {
+			if st.TunStarting || vm.tunBusy {
+				ui.Spinner(c).Size(11, 11)
+			} else {
+				ui.Icon(c, svgGlobe).Size(12.5, 12.5).TextColor(tunFg)
+			}
+			ui.Text(c, tunText).FontSize(11.5).Bold().TextColor(tunFg).NoWrap()
+		})
+		if tunBtn.Clicked() {
+			vm.tunModalOpen = true
+			vm.tunModalErr = ""
 		}
 
 		// HTTPS 白名单解密与证书设置入口按钮
@@ -1264,6 +1318,202 @@ func (vm *captureViewModel) uninstallCertAsync() {
 			} else {
 				vm.certActionErr = ""
 				vm.showToast("已从系统根证书存储卸载本机 CA")
+			}
+		})
+	}()
+}
+
+// renderCaptureTunModal 在抓包分析窗口弹出 TUN 全机流量捕获确认弹窗：
+// 若当前未开启 TUN，先明确告知用户需开启 TUN 模式并说明权限与路由影响，经用户确认后再代为开启。
+func (vm *captureViewModel) renderCaptureTunModal(c *ui.Context, p palette) {
+	if !vm.tunModalOpen {
+		return
+	}
+	st := vm.status
+	winW, winH := c.Size()
+	panelW := min(float32(520), max(float32(360), winW-48))
+	shadowAlpha := float32(0.24)
+	backdropAlpha := float32(0.42)
+	if c.Theme().Dark {
+		shadowAlpha = 0.48
+		backdropAlpha = 0.56
+	}
+	needsWinRestart := runtime.GOOS == "windows" && vm.app != nil && vm.app.eng != nil && vm.app.eng.TunNeedsElevationRestart()
+
+	modal := ui.DialogBase(c.Key("cap-tun-modal"), &vm.tunModalOpen, func(backdrop, panel ui.Element) {
+		backdrop.Background(ui.RGBA(0, 0, 0, backdropAlpha))
+		panel.Width(panelW).MaxHeight(max(float32(300), winH-56)).Padding(18).Gap(12).Radius(14).
+			Background(p.card).Border(1, p.borderStrong).
+			Shadow(0, 12, 34, 0, ui.RGBA(0, 0, 0, shadowAlpha))
+
+		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+			iconBg := p.accentSoft
+			iconFg := p.accent
+			title := "捕获全部流量需先开启 TUN 模式"
+			if st.TunActive {
+				iconBg = p.successSoft
+				iconFg = p.success
+				title = "全机流量抓包已启用（TUN 模式）"
+			}
+			ui.Box(c).Size(26, 26).Radius(7.5).Background(iconBg).Center().Children(func() {
+				ui.Icon(c, svgGlobe).Size(14.5, 14.5).TextColor(iconFg)
+			})
+			ui.Text(c, title).FontSize(14.5).Bold().TextColor(p.text)
+			ui.Spacer(c)
+			closeBtn := ui.Box(c.Key("cap-tun-modal-close")).Size(24, 24).Radius(6).Center().
+				Cursor(ui.CursorPointer).Label("关闭").Tooltip("关闭")
+			if closeBtn.Hovered() {
+				closeBtn.Background(p.pillBg)
+			}
+			closeBtn.Children(func() {
+				ui.Icon(c, svgClose).Size(13, 13).TextColor(p.textMuted)
+			})
+			if !vm.tunBusy && closeBtn.Clicked() {
+				vm.tunModalOpen = false
+				vm.tunModalErr = ""
+			}
+		})
+
+		if st.TunActive {
+			devInfo := st.TunDevice
+			if devInfo == "" {
+				devInfo = "TUN 虚拟网卡"
+			}
+			ui.Text(c, fmt.Sprintf("当前已通过虚拟网卡 %s 接管全机流量，不遵循系统代理的桌面软件与命令行请求均会进入本窗口，且命中白名单的 HTTPS 域名将自动解密。", devInfo)).
+				FontSize(12).TextColor(p.textSecondary).Wrap()
+
+			if vm.tunModalErr != "" {
+				ui.Row(c).Padding(7, 10).Radius(8).Background(p.dangerSoft).Children(func() {
+					ui.Text(c, vm.tunModalErr).FontSize(11.5).TextColor(p.danger).Wrap()
+				})
+			}
+
+			ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+				ui.Spacer(c)
+				if applyPointerCursor(ui.Button(c.Key("cap-tun-keep"), "保持开启").Padding(6, 14).Radius(7.5).
+					Disabled(vm.tunBusy), vm.tunBusy).Clicked() {
+					vm.tunModalOpen = false
+					vm.tunModalErr = ""
+				}
+				disableLbl := "关闭 TUN（切回仅代理抓包）"
+				if vm.tunBusy {
+					disableLbl = "正在关闭并还原路由…"
+				}
+				stopBtn := ui.Row(c.Key("cap-tun-disable")).Padding(6, 13).Radius(7.5).
+					Background(p.dangerSoft).Border(1, p.danger).AlignItems(ui.Center).Gap(5).Label("关闭 TUN 模式")
+				if vm.tunBusy {
+					stopBtn.Opacity(0.6)
+				} else {
+					stopBtn.Cursor(ui.CursorPointer)
+				}
+				stopBtn.Children(func() {
+					ui.Text(c, disableLbl).FontSize(12).Bold().TextColor(p.danger).NoWrap()
+				})
+				if !vm.tunBusy && stopBtn.Clicked() {
+					vm.toggleTunFromCapture(false)
+				}
+			})
+			return
+		}
+
+		// 未开启 TUN：明确提示必须先开启 TUN，并由用户确认后再代为开启
+		ui.Text(c, fmt.Sprintf("当前抓包默认仅捕获经过本地代理端口（:%d）的流量；若需捕获不遵循系统代理的桌面软件、命令行工具等全机流量，请先确认开启 TUN 虚拟网卡模式。", st.ProxyPort)).
+			FontSize(12).TextColor(p.textSecondary).Wrap()
+
+		ui.Column(c).Padding(10, 12).Gap(5).Radius(9).Background(p.warningSoft).Border(1, p.warning.Alpha(0.35)).Children(func() {
+			ui.Text(c, "开启前请确认以下事项").FontSize(12).Bold().TextColor(p.warning)
+			for _, line := range tunSafetyBullets(runtime.GOOS, needsWinRestart) {
+				ui.Text(c, "• "+line).FontSize(11.5).TextColor(p.textSecondary).Wrap()
+			}
+			ui.Text(c, "• 开启 TUN 后仍遵循白名单 HTTPS 解密策略：未加入白名单的域名保持原样透传，不影响证书锁定类应用正常联网。").
+				FontSize(11.5).TextColor(p.textSecondary).Wrap()
+		})
+
+		if vm.tunModalErr != "" {
+			ui.Row(c).Padding(7, 10).Radius(8).Background(p.dangerSoft).Children(func() {
+				ui.Text(c, vm.tunModalErr).FontSize(11.5).TextColor(p.danger).Wrap()
+			})
+		}
+
+		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Spacer(c)
+			if applyPointerCursor(ui.Button(c.Key("cap-tun-cancel"), "暂不开启").Padding(6, 14).Radius(7.5).
+				Disabled(vm.tunBusy), vm.tunBusy).Clicked() {
+				vm.tunModalOpen = false
+				vm.tunModalErr = ""
+			}
+			if needsWinRestart {
+				if ui.PrimaryButton(c.Key("cap-tun-win-relaunch"), "以管理员身份重启").Padding(6, 14).Radius(7.5).
+					Cursor(ui.CursorPointer).Clicked() {
+					if err := vm.app.eng.RelaunchAsAdmin(); err != nil {
+						vm.tunModalErr = err.Error()
+					} else {
+						mygo.App.Quit()
+					}
+				}
+			} else {
+				confirmLbl := "确认并开启 TUN"
+				if !st.Enabled {
+					confirmLbl = "确认并开启 TUN 抓包"
+				}
+				if vm.tunBusy {
+					confirmLbl = "正在授权并启动 TUN…"
+				}
+				if applyPointerCursor(ui.PrimaryButton(c.Key("cap-tun-confirm"), confirmLbl).Padding(6, 14).Radius(7.5).
+					Disabled(vm.tunBusy), vm.tunBusy).Clicked() {
+					vm.toggleTunFromCapture(true)
+				}
+			}
+		})
+	})
+
+	if modal.Dismissed() {
+		if vm.tunBusy {
+			vm.tunModalOpen = true
+		} else {
+			vm.tunModalOpen = false
+			vm.tunModalErr = ""
+		}
+	}
+}
+
+func (vm *captureViewModel) toggleTunFromCapture(enable bool) {
+	if vm.app == nil || vm.app.eng == nil || vm.tunBusy {
+		return
+	}
+	vm.tunBusy = true
+	vm.tunModalErr = ""
+	go func() {
+		var err error
+		if enable {
+			// 若尚未开启前置抓包录制，在用户确认开启 TUN 抓包时一并顺手打开录制
+			if !vm.app.eng.CaptureStatus().Enabled {
+				if cerr := vm.app.eng.SetCaptureEnabled(true); cerr != nil {
+					err = cerr
+				}
+			}
+			if err == nil {
+				err = vm.app.eng.SetTunEnabled(true)
+			}
+		} else {
+			err = vm.app.eng.SetTunEnabled(false)
+		}
+		st := vm.app.eng.CaptureStatus()
+		entries := vm.app.eng.CaptureStore().Snapshot()
+		vm.app.updateCaptureWindow(func() {
+			vm.tunBusy = false
+			vm.status = st
+			vm.entries = entries
+			if err != nil {
+				vm.tunModalErr = err.Error()
+				return
+			}
+			vm.tunModalOpen = false
+			vm.tunModalErr = ""
+			if enable {
+				vm.showToast("已开启 TUN 模式，正在捕获全机流量")
+			} else {
+				vm.showToast("已关闭 TUN 模式，切回代理端口抓包")
 			}
 		})
 	}()

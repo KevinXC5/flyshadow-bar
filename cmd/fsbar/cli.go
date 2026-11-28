@@ -185,6 +185,9 @@ func runCLI(args []string) error {
 	case "sysproxy":
 		return cmdSysProxy(ctx, cli, rest, jsonOut)
 
+	case "tun":
+		return cmdTun(ctx, cli, rest, jsonOut)
+
 	case "ping":
 		fmt.Fprintln(os.Stderr, "正在并发测速全部节点…")
 		nodes, err := cli.Ping(ctx)
@@ -433,6 +436,56 @@ func cmdSysProxy(ctx context.Context, cli *control.Client, args []string, jsonOu
 
 	default:
 		return fmt.Errorf("未知 sysproxy 参数 %q（支持: on, off, toggle, services, exclude, include, reset；运行 `fsbar help sysproxy` 查看详细说明）", args[0])
+	}
+}
+
+func cmdTun(ctx context.Context, cli *control.Client, args []string, jsonOut bool) error {
+	action := "status"
+	if len(args) > 0 {
+		action = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	switch action {
+	case "status":
+		snap, err := cli.Status(ctx)
+		if err != nil {
+			return err
+		}
+		if jsonOut {
+			return writeIndentedJSON(map[string]any{
+				"tunEnabled":        snap.TunEnabled,
+				"tunActive":         snap.TunActive,
+				"tunStarting":       snap.TunStarting,
+				"tunDevice":         snap.TunDevice,
+				"tunOutboundIface":  snap.TunOutboundIface,
+				"tunRouteCount":     snap.TunRouteCount,
+				"tunScopedTestMode": snap.TunScopedTestMode,
+				"tunLastError":      snap.TunLastError,
+			})
+		}
+		line := fmt.Sprintf("TUN 模式: %s", onOff(snap.TunActive))
+		if snap.TunActive && snap.TunDevice != "" {
+			line += fmt.Sprintf("（虚拟网卡: %s，路由 %d 条）", snap.TunDevice, snap.TunRouteCount)
+		} else if snap.TunLastError != "" {
+			line += fmt.Sprintf("（上次错误: %s）", snap.TunLastError)
+		}
+		fmt.Println(line)
+		return nil
+	case "on", "off", "toggle":
+		snap, err := cli.SetTun(ctx, action)
+		if err != nil {
+			return err
+		}
+		if jsonOut {
+			return writeIndentedJSON(snap)
+		}
+		line := fmt.Sprintf("TUN 模式: %s", onOff(snap.TunActive))
+		if snap.TunActive && snap.TunDevice != "" {
+			line += fmt.Sprintf("（虚拟网卡: %s，路由 %d 条）", snap.TunDevice, snap.TunRouteCount)
+		}
+		fmt.Println(line)
+		return nil
+	default:
+		return fmt.Errorf("未知 tun 参数 %q（支持: status, on, off, toggle；运行 `fsbar help tun` 查看详细说明）", args[0])
 	}
 }
 
@@ -714,6 +767,13 @@ func printStatus(snap *engine.Snapshot, jsonOut bool) error {
 		sysProxyLine += fmt.Sprintf("（已排除: %s）", strings.Join(snap.SysProxyExcludedServices, ", "))
 	}
 	fmt.Printf("系统代理:   %s\n", sysProxyLine)
+	tunLine := onOff(snap.TunActive)
+	if snap.TunActive && snap.TunDevice != "" {
+		tunLine += fmt.Sprintf("（%s，路由 %d 条）", snap.TunDevice, snap.TunRouteCount)
+	} else if snap.TunStarting {
+		tunLine = "启动中…"
+	}
+	fmt.Printf("TUN 模式:   %s\n", tunLine)
 	fmt.Printf("UDP 加速:   %s（当前节点生效: %s）\n", onOff(snap.UDPAccelerationEnabled), onOff(snap.EffectiveTransport.EnableQuic))
 	fmt.Printf("原生 UDP:   %s（当前节点生效: %s）\n", onOff(snap.NativeUDP), onOff(snap.EffectiveTransport.EnableNativeUDP))
 	fmt.Printf("实时速率:   ↑ %s   ↓ %s\n", ui.FormatSpeed(snap.UploadSpeedBps), ui.FormatSpeed(snap.DownloadSpeedBps))
@@ -805,6 +865,7 @@ CLI 全局选项（可放在任意位置，适用于所有子命令）:
   native-udp [on|off|toggle]                开关原生 UDP 转发并热重连，省略参数默认 toggle
   sysproxy [on|off|toggle|services|exclude|include|reset]
                                             开关系统代理，或在 macOS 上管理排除的系统代理网卡
+  tun [status|on|off|toggle]                查询或开关 TUN 虚拟网卡全局接管模式（支持全机透明抓包）
   reload                                    重新读取 ~/.flyshadowbar/config.json 并热刷新规则与配置
   sync                                      从云端同步最新订阅节点、流量用量、到期时间与自定义规则
 
@@ -985,6 +1046,26 @@ func printCommandHelp(w io.Writer, raw string) error {
   fsbar sysproxy exclude "USB 10/100/1000 LAN"
   fsbar sysproxy include "USB 10/100/1000 LAN"
   fsbar sysproxy reset
+`)
+	case "tun":
+		fmt.Fprint(w, `用法:
+  fsbar tun [status|on|off|toggle] [--json]
+
+说明:
+  开启或关闭 TUN 虚拟网卡模式（macOS 使用原生 utun，Windows 使用 wintun.dll）。
+  开启后可透明接管不遵循系统代理的桌面应用与命令行流量，并在抓包分析中捕获全机流量。
+  自动保留局域网与 100.64.0.0/10 等远程隧道网段，关闭或退出时自动销毁网卡并还原路由。
+
+参数:
+  status             查看当前 TUN 虚拟网卡运行状态（默认动作）
+  on                 开启 TUN 模式并保存至 config.json (tunModelEnable)
+  off                关闭 TUN 模式并还原系统路由
+  toggle             取反切换 TUN 模式
+
+示例:
+  fsbar tun status
+  fsbar tun on
+  fsbar tun off
 `)
 	case "ping":
 		fmt.Fprint(w, `用法:

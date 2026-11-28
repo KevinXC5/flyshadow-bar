@@ -14,6 +14,7 @@ import (
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
 	"github.com/KevinXC5/flyshadow-bar/internal/core"
 	"github.com/KevinXC5/flyshadow-bar/internal/sysproxy"
+	"github.com/KevinXC5/flyshadow-bar/internal/tun"
 )
 
 type mockCore struct {
@@ -29,6 +30,7 @@ type mockCore struct {
 	lastHost     string
 	lastPort     int
 	lastQuic     bool
+	tunEnabled   bool
 	ruleCount    int
 	upload       int64
 	download     int64
@@ -45,7 +47,12 @@ func (m *mockCore) SetClientUUID(string)              {}
 func (m *mockCore) SetIPv6Enable(bool)                {}
 func (m *mockCore) SetUseBuildInDNS(bool)             {}
 func (m *mockCore) SetDirectConnPriority(bool, int64) {}
-func (m *mockCore) SetGeoIP(string, []byte)           {}
+func (m *mockCore) SetTunModeEnable(enabled bool) {
+	m.mu.Lock()
+	m.tunEnabled = enabled
+	m.mu.Unlock()
+}
+func (m *mockCore) SetGeoIP(string, []byte) {}
 
 func (m *mockCore) SetProxyType(mode core.ProxyMode) {
 	m.mu.Lock()
@@ -1181,5 +1188,97 @@ func TestEngineCaptureProxyLifecycleAndMITMWhitelist(t *testing.T) {
 	mc.mu.Unlock()
 	if restoredPort != port {
 		t.Fatalf("expected core proxy restored to user port %d, got %d", port, restoredPort)
+	}
+}
+
+type stubTunDevice struct {
+	name   string
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newStubTunDevice(name string) *stubTunDevice {
+	return &stubTunDevice{name: name, closed: make(chan struct{})}
+}
+
+func (d *stubTunDevice) Name() string          { return d.name }
+func (d *stubTunDevice) MTU() int              { return 1500 }
+func (d *stubTunDevice) OutboundIface() string { return "en1" }
+func (d *stubTunDevice) Gateway() string       { return "192.168.4.1" }
+func (d *stubTunDevice) RouteCount() int       { return 10 }
+func (d *stubTunDevice) AddBypassIP(string) error {
+	return nil
+}
+func (d *stubTunDevice) ReadPacket([]byte) (int, error) {
+	<-d.closed
+	return 0, errors.New("closed")
+}
+func (d *stubTunDevice) WritePacket(p []byte) (int, error) { return len(p), nil }
+func (d *stubTunDevice) Close() error {
+	d.once.Do(func() { close(d.closed) })
+	return nil
+}
+
+func TestEngineTunLifecycleAndConfigPersistence(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	raw := `{"proxyPort":17988,"proxyType":3,"subscribeInfo":{"node":[{"id":1,"name":"HK1","cnName":"香港","host":"1.1.1.1","port":443,"password":"secret"}]}}`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mc := &mockCore{}
+	eng, err := New(Options{
+		ConfigPath:          cfgPath,
+		CoreClient:          mc,
+		SysProxy:            &mockSysProxy{},
+		DisableAutoSysProxy: true,
+		TunOpenDevice: func(tun.DeviceConfig) (tun.PacketDevice, error) {
+			return newStubTunDevice("utun99"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New engine failed: %v", err)
+	}
+	defer eng.Shutdown()
+
+	if err := eng.SetTunEnabled(true); err != nil {
+		t.Fatalf("SetTunEnabled(true) failed: %v", err)
+	}
+	snap := eng.Snapshot()
+	if !snap.TunActive || !snap.TunEnabled || snap.TunDevice != "utun99" || snap.TunRouteCount != 10 {
+		t.Fatalf("unexpected TUN snapshot after enable: %+v", snap)
+	}
+	mc.mu.Lock()
+	coreTunOn := mc.tunEnabled
+	mc.mu.Unlock()
+	if !coreTunOn {
+		t.Fatalf("expected core.SetTunModeEnable(true) to be called")
+	}
+
+	// 验证 config.json 无损写回 tunModelEnable=true
+	reloaded, err := config.Load(cfgPath)
+	if err != nil || !reloaded.TunModelEnable {
+		t.Fatalf("expected tunModelEnable persisted true, got %+v err=%v", reloaded, err)
+	}
+
+	// 抓包状态应同步体现 TUN 已激活
+	cst := eng.CaptureStatus()
+	if !cst.TunActive || cst.TunDevice != "utun99" {
+		t.Fatalf("expected CaptureStatus to reflect active TUN, got %+v", cst)
+	}
+
+	if err := eng.SetTunEnabled(false); err != nil {
+		t.Fatalf("SetTunEnabled(false) failed: %v", err)
+	}
+	snap = eng.Snapshot()
+	if snap.TunActive || snap.TunEnabled {
+		t.Fatalf("expected TUN disabled, got %+v", snap)
+	}
+	mc.mu.Lock()
+	coreTunOn = mc.tunEnabled
+	mc.mu.Unlock()
+	if coreTunOn {
+		t.Fatalf("expected core.SetTunModeEnable(false) after disable")
 	}
 }

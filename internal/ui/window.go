@@ -69,6 +69,11 @@ type viewModel struct {
 	// 生效分流规则查看弹窗状态
 	activeRulesModal activeRulesModalState
 
+	// TUN 模式开启确认弹窗状态
+	tunModalOpen bool
+	tunBusy      bool
+	tunModalErr  string
+
 	checkingUpdate         bool
 	updateNativeEnabled    bool
 	updateAvailable        string
@@ -284,6 +289,11 @@ func (vm *viewModel) render(c *ui.Context) {
 				if !vm.subSaving {
 					vm.closeSubscribeModal()
 				}
+			} else if vm.tunModalOpen {
+				if !vm.tunBusy {
+					vm.tunModalOpen = false
+					vm.tunModalErr = ""
+				}
 			} else if vm.activeRulesModal.open {
 				vm.closeActiveRulesModal()
 			} else if vm.connSortMenuOpen {
@@ -352,6 +362,7 @@ func (vm *viewModel) render(c *ui.Context) {
 
 	vm.renderSubscribeModal(c, p)
 	vm.renderActiveRulesModal(c, p)
+	vm.renderTunModal(c, p)
 }
 
 func (vm *viewModel) renderTitleBar(c *ui.Context, p palette) {
@@ -487,19 +498,33 @@ func (vm *viewModel) renderCompactOverview(c *ui.Context, p palette) {
 		// 第三行：代理模式三等分切换栏
 		vm.renderModeBar(c, p, snap.ModeCode)
 
-		// 第四行：三个紧凑快捷开关（系统代理 / UDP 加速 / 原生 UDP）
-		ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
-			sysOn := snap.SystemProxy
-			vm.renderQuickToggle(c, p, "qt-sysproxy", "系统代理", &sysOn, func(v bool) {
-				vm.runAsync(func() error { return vm.app.eng.SetSystemProxy(v) }, toggleToast("系统代理", v))
+		// 第四行：2×2 紧凑快捷开关（系统代理 / TUN 模式 / UDP 加速 / 原生 UDP）
+		ui.Column(c).Gap(5).Children(func() {
+			ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
+				sysOn := snap.SystemProxy
+				vm.renderQuickToggle(c, p, "qt-sysproxy", "系统代理", &sysOn, func(v bool) {
+					vm.runAsync(func() error { return vm.app.eng.SetSystemProxy(v) }, toggleToast("系统代理", v))
+				})
+				tunOn := snap.TunActive
+				tunLabel := "TUN 模式"
+				if snap.TunStarting || vm.tunBusy {
+					tunLabel = "TUN 启动中…"
+				} else if snap.TunActive && snap.TunDevice != "" {
+					tunLabel = "TUN · " + snap.TunDevice
+				}
+				vm.renderQuickToggle(c, p, "qt-tun", tunLabel, &tunOn, func(v bool) {
+					vm.requestToggleTun(v)
+				})
 			})
-			udpOn := snap.UDPAccelerationEnabled
-			vm.renderQuickToggle(c, p, "qt-udp", "UDP 加速", &udpOn, func(v bool) {
-				vm.runAsync(func() error { return vm.app.eng.SetUDPAcceleration(v) }, toggleToast("UDP 加速 (QUIC)", v))
-			})
-			nativeOn := snap.NativeUDP
-			vm.renderQuickToggle(c, p, "qt-native", "原生 UDP", &nativeOn, func(v bool) {
-				vm.runAsync(func() error { return vm.app.eng.SetNativeUDP(v) }, toggleToast("原生 UDP", v))
+			ui.Row(c).Gap(6).AlignItems(ui.Stretch).Children(func() {
+				udpOn := snap.UDPAccelerationEnabled
+				vm.renderQuickToggle(c, p, "qt-udp", "UDP 加速", &udpOn, func(v bool) {
+					vm.runAsync(func() error { return vm.app.eng.SetUDPAcceleration(v) }, toggleToast("UDP 加速 (QUIC)", v))
+				})
+				nativeOn := snap.NativeUDP
+				vm.renderQuickToggle(c, p, "qt-native", "原生 UDP", &nativeOn, func(v bool) {
+					vm.runAsync(func() error { return vm.app.eng.SetNativeUDP(v) }, toggleToast("原生 UDP", v))
+				})
 			})
 		})
 	})
@@ -873,6 +898,159 @@ func (vm *viewModel) submitSubscribePassword() {
 	}()
 }
 
+// requestToggleTun 处理主面板/设置页中的 TUN 开关：
+// 关闭直接执行还原路由；开启前先弹出透明确认与系统授权说明弹窗，由用户确认后再执行。
+func (vm *viewModel) requestToggleTun(enable bool) {
+	if vm.tunBusy || vm.snap.TunStarting {
+		return
+	}
+	if !enable {
+		vm.runAsync(func() error {
+			return vm.app.eng.SetTunEnabled(false)
+		}, "已关闭 TUN 模式并还原路由")
+		return
+	}
+	vm.tunModalErr = ""
+	vm.tunModalOpen = true
+}
+
+func (vm *viewModel) confirmEnableTun() {
+	if vm.app == nil || vm.app.eng == nil || vm.tunBusy {
+		return
+	}
+	vm.tunBusy = true
+	vm.tunModalErr = ""
+	go func() {
+		err := vm.app.eng.SetTunEnabled(true)
+		vm.app.updateWindow(func() {
+			vm.tunBusy = false
+			if err != nil {
+				vm.tunModalErr = err.Error()
+				return
+			}
+			vm.tunModalOpen = false
+			vm.tunModalErr = ""
+			vm.showToast("已开启 TUN 模式")
+		})
+	}()
+}
+
+func (vm *viewModel) renderTunModal(c *ui.Context, p palette) {
+	if !vm.tunModalOpen {
+		return
+	}
+	winW, winH := c.Size()
+	panelW := min(float32(396), max(float32(316), winW-32))
+	shadowAlpha := float32(0.22)
+	backdropAlpha := float32(0.42)
+	if c.Theme().Dark {
+		shadowAlpha = 0.45
+		backdropAlpha = 0.56
+	}
+	needsWinRestart := runtime.GOOS == "windows" && vm.app != nil && vm.app.eng != nil && vm.app.eng.TunNeedsElevationRestart()
+
+	modal := ui.DialogBase(c.Key("main-tun-modal"), &vm.tunModalOpen, func(backdrop, panel ui.Element) {
+		backdrop.Background(ui.RGBA(0, 0, 0, backdropAlpha))
+		panel.Width(panelW).MaxHeight(max(float32(280), winH-44)).Padding(16).Gap(11).Radius(13).
+			Background(p.card).Border(1, p.borderStrong).
+			Shadow(0, 10, 30, 0, ui.RGBA(0, 0, 0, shadowAlpha))
+
+		ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
+			ui.Box(c).Size(24, 24).Radius(7).Background(p.accentSoft).Center().Children(func() {
+				ui.Icon(c, svgShield).Size(13.5, 13.5).TextColor(p.accent)
+			})
+			ui.Text(c, "开启 TUN 虚拟网卡模式").FontSize(14).Bold().TextColor(p.text)
+			ui.Spacer(c)
+			closeBtn := ui.Box(c.Key("btn-main-tun-close")).Size(24, 24).Radius(6).Center().
+				Cursor(ui.CursorPointer).Label("关闭").Tooltip("关闭")
+			if closeBtn.Hovered() {
+				closeBtn.Background(p.pillBg)
+			}
+			closeBtn.Children(func() {
+				ui.Icon(c, svgClose).Size(13, 13).TextColor(p.textMuted)
+			})
+			if !vm.tunBusy && closeBtn.Clicked() {
+				vm.tunModalOpen = false
+				vm.tunModalErr = ""
+			}
+		})
+
+		ui.Text(c, "开启后将创建虚拟网卡接管系统流量，不遵循系统代理的桌面应用与命令行也可走代理与规则分流，并在抓包分析中捕获全机流量。").
+			FontSize(11.5).TextColor(p.textSecondary).Wrap()
+
+		ui.Column(c).Padding(9, 10).Gap(5).Radius(8.5).Background(p.warningSoft).Border(1, p.warning.Alpha(0.35)).Children(func() {
+			ui.Text(c, "权限与路由安全说明").FontSize(11.5).Bold().TextColor(p.warning)
+			for _, line := range tunSafetyBullets(runtime.GOOS, needsWinRestart) {
+				ui.Text(c, "• "+line).FontSize(11).TextColor(p.textSecondary).Wrap()
+			}
+		})
+
+		if vm.tunModalErr != "" {
+			ui.Row(c).Padding(6, 9).Radius(7).Background(p.dangerSoft).Children(func() {
+				ui.Text(c, vm.tunModalErr).FontSize(11).TextColor(p.danger).Wrap()
+			})
+		}
+
+		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Spacer(c)
+			if applyPointerCursor(ui.Button(c.Key("btn-main-tun-cancel"), "取消").Padding(6, 13).Radius(7).
+				Disabled(vm.tunBusy), vm.tunBusy).Clicked() {
+				vm.tunModalOpen = false
+				vm.tunModalErr = ""
+			}
+			if needsWinRestart {
+				if ui.PrimaryButton(c.Key("btn-main-tun-relaunch"), "以管理员身份重启").Padding(6, 14).Radius(7).
+					Cursor(ui.CursorPointer).Clicked() {
+					if err := vm.app.eng.RelaunchAsAdmin(); err != nil {
+						vm.tunModalErr = err.Error()
+					} else {
+						mygo.App.Quit()
+					}
+				}
+			} else {
+				confirmLabel := "确认并开启 TUN"
+				if vm.tunBusy {
+					confirmLabel = "正在授权启动…"
+				}
+				if applyPointerCursor(ui.PrimaryButton(c.Key("btn-main-tun-confirm"), confirmLabel).Padding(6, 14).Radius(7).
+					Disabled(vm.tunBusy), vm.tunBusy).Clicked() {
+					vm.confirmEnableTun()
+				}
+			}
+		})
+	})
+	if modal.Dismissed() {
+		if vm.tunBusy {
+			vm.tunModalOpen = true
+		} else {
+			vm.tunModalOpen = false
+			vm.tunModalErr = ""
+		}
+	}
+}
+
+func tunSafetyBullets(goos string, winNeedsRestart bool) []string {
+	if goos == "windows" {
+		if winNeedsRestart {
+			return []string{
+				"Windows 下创建 Wintun 虚拟网卡并配置路由需要管理员权限（UAC），请点击下方按钮以管理员身份重启。",
+				"自动保留局域网（10/8、172.16/12、192.168/16）与 100.64.0.0/10 等远程隧道网段，不删除原默认路由。",
+				"关闭 TUN 或退出 FlyShadow Bar 时自动卸载虚拟网卡并清理全部新增路由。",
+			}
+		}
+		return []string{
+			"将通过内置/官方 wintun.dll 创建虚拟网卡（198.18.0.1/16）并添加分片接管路由。",
+			"自动保留局域网（10/8、172.16/12、192.168/16）与 100.64.0.0/10 等远程隧道网段，不删除原默认路由。",
+			"关闭 TUN 或退出 FlyShadow Bar 时自动销毁虚拟网卡并完整还原路由表。",
+		}
+	}
+	return []string{
+		"点击确认后将弹出 macOS 系统管理员密码/触控 ID 授权框，用于创建原生 utun 虚拟网卡与安全路由。",
+		"自动保留局域网与 100.64.0.0/10（如 Tailscale 等远程隧道）路由，绝不删除系统原有默认网关。",
+		"内置父进程看门狗：关闭 TUN、退出或程序异常终止后 1 秒内自动还原全部路由，避免断网。",
+	}
+}
+
 func (vm *viewModel) renderModeBar(c *ui.Context, p palette, active core.ProxyMode) {
 	options := []struct {
 		mode  core.ProxyMode
@@ -1148,6 +1326,20 @@ func (vm *viewModel) renderSettingsView(c *ui.Context, p palette) {
 					vm.runAsync(func() error {
 						return vm.app.eng.UpdateLocalProxySettings(port, v)
 					}, toggleToast("局域网连接", v))
+				})
+
+				ui.Divider(c)
+				tunActive := snap.TunActive
+				tunDesc := "接管不遵循系统代理的桌面应用与命令行流量（支持全机抓包）"
+				if snap.TunActive && snap.TunDevice != "" {
+					tunDesc = fmt.Sprintf("已启用 · 虚拟网卡 %s（路由 %d 条，退出自动还原）", snap.TunDevice, snap.TunRouteCount)
+				} else if snap.TunStarting || vm.tunBusy {
+					tunDesc = "正在请求权限并创建虚拟网卡…"
+				} else if snap.TunLastError != "" {
+					tunDesc = "上次异常: " + snap.TunLastError
+				}
+				renderSettingSwitch(c, p, "sw-tun", "TUN 虚拟网卡模式", tunDesc, &tunActive, func(v bool) {
+					vm.requestToggleTun(v)
 				})
 
 				ui.Divider(c)

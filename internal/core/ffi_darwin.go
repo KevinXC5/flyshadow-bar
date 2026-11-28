@@ -34,6 +34,7 @@ type NativeClient struct {
 	fnSetIPv6Enable         func(rt, tc int64, enable bool)
 	fnSetUseBuildInDNS      func(rt, tc int64, enable bool)
 	fnSetDirectConnPriority func(rt, tc int64, enable bool, timeoutMs int64)
+	fnSetTunModeEnable      func(rt, tc int64, enable bool)
 	fnClearDomainRule       func(rt, tc int64)
 	fnSetDomainRuleObj      func(rt, tc int64, domain string, matching, proxyType, directConnPriority int32)
 	fnSetGeoIP              func(rt, tc int64, country string, data uintptr, length int32)
@@ -103,6 +104,10 @@ func Open(libPath string) (Client, error) {
 	purego.RegisterLibFunc(&c.fnCloseConnect, h, "close_connect")
 	purego.RegisterLibFunc(&c.fnGetVersion, h, "get_version")
 	purego.RegisterLibFunc(&c.fnFreeString, h, "free_string")
+	// 兼容不同版本核心库：set_tun_mode_enable 作为可选符号加载，存在时才注册。
+	if _, symErr := purego.Dlsym(h, "set_tun_mode_enable"); symErr == nil {
+		purego.RegisterLibFunc(&c.fnSetTunModeEnable, h, "set_tun_mode_enable")
+	}
 
 	return c, nil
 }
@@ -192,6 +197,14 @@ func (c *NativeClient) SetDirectConnPriority(enabled bool, timeoutMs int64) {
 		return
 	}
 	c.fnSetDirectConnPriority(rt, tc, enabled, timeoutMs)
+}
+
+func (c *NativeClient) SetTunModeEnable(enabled bool) {
+	rt, tc := c.handles()
+	if rt == 0 || tc == 0 || c.fnSetTunModeEnable == nil {
+		return
+	}
+	c.fnSetTunModeEnable(rt, tc, enabled)
 }
 
 func (c *NativeClient) ClearDomainRules() {

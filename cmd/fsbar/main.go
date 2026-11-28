@@ -9,11 +9,21 @@ import (
 
 	"github.com/KevinXC5/flyshadow-bar/internal/applog"
 	"github.com/KevinXC5/flyshadow-bar/internal/config"
+	"github.com/KevinXC5/flyshadow-bar/internal/tun"
 	"github.com/KevinXC5/flyshadow-bar/internal/ui"
 )
 
 func main() {
 	args := os.Args[1:]
+
+	// macOS 内置提权 TUN 辅助子命令：直接以 root 运行虚拟网卡与路由回滚看门狗
+	if len(args) > 0 && args[0] == "tun-helper" {
+		if err := tun.RunMacHelper(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "tun-helper 失败: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// 无参数、macOS LaunchServices 传入的 -psn_*，或显式 GUI 标志均启动桌面应用
 	if isGUILaunch(args) {

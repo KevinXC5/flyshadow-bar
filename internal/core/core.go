@@ -115,6 +115,7 @@ type Client interface {
 	SetIPv6Enable(enabled bool)
 	SetUseBuildInDNS(enabled bool)
 	SetDirectConnPriority(enabled bool, timeoutMs int64)
+	SetTunModeEnable(enabled bool)
 
 	ClearDomainRules()
 	SetDomainRule(domain string, matching, proxyType, directConnPriority int32)
