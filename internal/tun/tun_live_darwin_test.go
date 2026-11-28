@@ -428,3 +428,14 @@ func buildTestDNSAnswer(query []byte, answerIP net.IP) []byte {
 }
 
 var _ = fmt.Sprintf
+
+func TestBuildMacHelperLaunchCmdAvoidsNohup(t *testing.T) {
+	cmd := buildMacHelperLaunchCmd("/Applications/FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar",
+		[]string{"tun-helper", "--sock", "/tmp/a b/tun.sock"}, "/tmp/a b/helper.log")
+	if strings.Contains(cmd, "nohup") {
+		t.Fatalf("macOS osascript launch command must not use nohup: %s", cmd)
+	}
+	if !strings.Contains(cmd, "trap '' HUP;") || !strings.Contains(cmd, "'/Applications/FlyShadow Bar.app/Contents/MacOS/FlyShadow Bar'") {
+		t.Fatalf("unexpected macOS helper launch cmd: %s", cmd)
+	}
+}

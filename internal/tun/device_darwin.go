@@ -565,29 +565,24 @@ func openHelperDarwinDevice(cfg DeviceConfig) (PacketDevice, error) {
 		helperArgs = append(helperArgs, "--scoped")
 	}
 
-	// 构造带单引号安全转义的后台拉起命令，通过 osascript 弹出 macOS 系统原生管理员授权框
-	var cmdParts []string
-	cmdParts = append(cmdParts, shellSingleQuote(exePath))
-	for _, a := range helperArgs {
-		cmdParts = append(cmdParts, shellSingleQuote(a))
-	}
+	// 构造带单引号安全转义的后台拉起命令，通过 osascript 弹出 macOS 系统原生管理员授权框。
+	// 注意：macOS 的 `do shell script ... with administrator privileges` 无控制终端，不能使用系统自带 `nohup`
+	//（否则会报错 `nohup: can't detach from console: No such process`），改为 `trap '' HUP` + 完整 stdio 重定向，
+	// 并由 RunMacHelper 自身忽略 SIGHUP 与调用 setsid 脱离原会话。
 	logFile := filepath.Join(sockDir, "helper.log")
-	shellCmd := fmt.Sprintf("nohup %s >%s 2>&1 </dev/null &", strings.Join(cmdParts, " "), shellSingleQuote(logFile))
+	shellCmd := buildMacHelperLaunchCmd(exePath, helperArgs, logFile)
 	appleScript := fmt.Sprintf(
 		`do shell script %q with prompt "FlyShadow Bar 需要管理员权限以创建 TUN 虚拟网卡并配置路由（退出后自动还原）。" with administrator privileges`,
 		shellCmd,
 	)
 
-	// 异步等待 helper 回连，主流程同步执行 osascript 授权弹窗
+	// 异步等待 helper 回连，主流程同步执行 osascript 授权弹窗（授权期间不设短超时，避免用户输入密码稍慢导致误超时）
 	type acceptResult struct {
 		conn net.Conn
 		err  error
 	}
 	acceptCh := make(chan acceptResult, 1)
 	go func() {
-		if uln, ok := ln.(*net.UnixListener); ok {
-			_ = uln.SetDeadline(time.Now().Add(45 * time.Second))
-		}
 		c, aerr := ln.Accept()
 		acceptCh <- acceptResult{conn: c, err: aerr}
 	}()
@@ -604,12 +599,29 @@ func openHelperDarwinDevice(cfg DeviceConfig) (PacketDevice, error) {
 		return nil, fmt.Errorf("macOS 管理员授权失败: %s", msg)
 	}
 
-	res := <-acceptCh
+	// osascript 返回后 helper 已在后台拉起，正常 200ms 内即可回连；最多等待 8 秒避免异常时久卡 UI
+	var res acceptResult
+	select {
+	case res = <-acceptCh:
+	case <-time.After(8 * time.Second):
+		_ = ln.Close()
+		res = <-acceptCh
+		if res.err == nil && res.conn != nil {
+			break
+		}
+		helperLog, _ := os.ReadFile(logFile)
+		_ = os.RemoveAll(sockDir)
+		detail := strings.TrimSpace(string(helperLog))
+		if detail != "" {
+			return nil, fmt.Errorf("等待 TUN 辅助服务连接超时: %s", detail)
+		}
+		return nil, fmt.Errorf("等待 TUN 辅助服务连接超时（8 秒内未收到回连）")
+	}
 	_ = ln.Close()
 	if res.err != nil {
 		helperLog, _ := os.ReadFile(logFile)
 		_ = os.RemoveAll(sockDir)
-		return nil, fmt.Errorf("等待 TUN 辅助服务连接超时: %v %s", res.err, strings.TrimSpace(string(helperLog)))
+		return nil, fmt.Errorf("等待 TUN 辅助服务连接失败: %v %s", res.err, strings.TrimSpace(string(helperLog)))
 	}
 	conn := res.conn
 
@@ -778,10 +790,23 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+func buildMacHelperLaunchCmd(exePath string, helperArgs []string, logFile string) string {
+	cmdParts := make([]string, 0, 1+len(helperArgs))
+	cmdParts = append(cmdParts, shellSingleQuote(exePath))
+	for _, a := range helperArgs {
+		cmdParts = append(cmdParts, shellSingleQuote(a))
+	}
+	return fmt.Sprintf("trap '' HUP; %s >%s 2>&1 </dev/null &", strings.Join(cmdParts, " "), shellSingleQuote(logFile))
+}
+
 // RunMacHelper 是内置提权子命令 `fsbar tun-helper` 的执行入口：
 // 负责以 root 权限打开 utun、配置安全路由、通过 Unix Socket 双向转发原始 IPv4 包，
 // 并在收到停止命令、Socket 断开、信号退出或父进程死亡时 500ms 内自动回滚全部路由。
 func RunMacHelper(args []string) error {
+	// 忽略 SIGHUP 并尝试创建独立会话，防止 osascript 授权子 shell 退出时误杀刚拉起的辅助进程
+	signal.Ignore(syscall.SIGHUP)
+	_, _ = syscall.Setsid()
+
 	fs := flag.NewFlagSet("tun-helper", flag.ContinueOnError)
 	sockPath := fs.String("sock", "", "Unix socket path")
 	token := fs.String("token", "", "Auth token")
@@ -875,9 +900,9 @@ func RunMacHelper(args []string) error {
 		})
 	}
 
-	// 信号退出自动还原路由
+	// 信号退出自动还原路由（不监听 SIGHUP，避免授权父 shell 退出时误触发停止）
 	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		select {
 		case <-sigCh:

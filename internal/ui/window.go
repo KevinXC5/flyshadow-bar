@@ -926,11 +926,15 @@ func (vm *viewModel) confirmEnableTun() {
 			vm.tunBusy = false
 			if err != nil {
 				vm.tunModalErr = err.Error()
-				return
+			} else {
+				vm.tunModalOpen = false
+				vm.tunModalErr = ""
+				vm.showToast("已开启 TUN 模式")
 			}
-			vm.tunModalOpen = false
-			vm.tunModalErr = ""
-			vm.showToast("已开启 TUN 模式")
+			// macOS 系统授权弹窗关闭后焦点可能被切回其他普通前台应用，主动将本窗口重新拉回前台
+			if vm.app != nil {
+				vm.app.refocusMainWindowIfVisible()
+			}
 		})
 	}()
 }

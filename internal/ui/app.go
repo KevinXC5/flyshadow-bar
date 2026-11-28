@@ -478,7 +478,7 @@ func shouldHideOnBlur(quitting, pinWindow, visible bool, vm *viewModel) bool {
 	if quitting || pinWindow || !visible {
 		return false
 	}
-	if vm != nil && (vm.updateDownloading || vm.subModalOpen || vm.subSaving || vm.activeRulesModal.open || vm.tunModalOpen || vm.tunBusy) {
+	if vm != nil && (vm.updateDownloading || vm.subModalOpen || vm.subSaving || vm.activeRulesModal.open || vm.tunModalOpen || vm.tunBusy || vm.snap.TunStarting) {
 		return false
 	}
 	return true
@@ -744,6 +744,28 @@ func (a *App) hideCaptureWindow() {
 	if a.captureWin != nil {
 		a.captureWin.Hide()
 	}
+}
+
+// refocusMainWindowIfVisible 在系统安全授权弹窗关闭后将主窗口重新拉回前台聚焦（避免无 Dock 图标的菜单栏应用被系统切到后台）。
+func (a *App) refocusMainWindowIfVisible() {
+	if a == nil || a.win == nil || !a.win.IsVisible() {
+		return
+	}
+	a.win.Show()
+	a.win.Focus()
+	mygo.App.Focus()
+	a.win.Invalidate()
+}
+
+// refocusCaptureWindowIfVisible 在系统证书/TUN 授权弹窗关闭后将抓包分析大窗口重新拉回前台聚焦。
+func (a *App) refocusCaptureWindowIfVisible() {
+	if a == nil || a.captureWin == nil || !a.captureWin.IsVisible() {
+		return
+	}
+	a.captureWin.Show()
+	a.captureWin.Focus()
+	mygo.App.Focus()
+	a.captureWin.Invalidate()
 }
 
 func (a *App) updateCaptureWindow(fn func()) {

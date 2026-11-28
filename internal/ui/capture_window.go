@@ -116,7 +116,12 @@ func (vm *captureViewModel) render(c *ui.Context) {
 		}
 	}
 
-	p := paletteFor(c.Theme().Dark)
+	base := c.Theme()
+	p := paletteFor(base.Dark)
+	themed := *base.WithAccent(p.accent)
+	themed.Background = p.canvas
+	themed.Radius = 9
+	c.SetTheme(&themed)
 
 	ui.Column(c).Fill().Background(p.canvas).Children(func() {
 		vm.renderHeaderBar(c, p)
@@ -1295,6 +1300,9 @@ func (vm *captureViewModel) installCertAsync() {
 				vm.certActionErr = cert.StatusDetail
 				vm.showToast("证书已导入，请确认系统信任状态")
 			}
+			if vm.app != nil {
+				vm.app.refocusCaptureWindowIfVisible()
+			}
 		})
 	}()
 }
@@ -1318,6 +1326,9 @@ func (vm *captureViewModel) uninstallCertAsync() {
 			} else {
 				vm.certActionErr = ""
 				vm.showToast("已从系统根证书存储卸载本机 CA")
+			}
+			if vm.app != nil {
+				vm.app.refocusCaptureWindowIfVisible()
 			}
 		})
 	}()
@@ -1506,14 +1517,17 @@ func (vm *captureViewModel) toggleTunFromCapture(enable bool) {
 			vm.entries = entries
 			if err != nil {
 				vm.tunModalErr = err.Error()
-				return
-			}
-			vm.tunModalOpen = false
-			vm.tunModalErr = ""
-			if enable {
-				vm.showToast("已开启 TUN 模式，正在捕获全机流量")
 			} else {
-				vm.showToast("已关闭 TUN 模式，切回代理端口抓包")
+				vm.tunModalOpen = false
+				vm.tunModalErr = ""
+				if enable {
+					vm.showToast("已开启 TUN 模式，正在捕获全机流量")
+				} else {
+					vm.showToast("已关闭 TUN 模式，切回代理端口抓包")
+				}
+			}
+			if vm.app != nil {
+				vm.app.refocusCaptureWindowIfVisible()
 			}
 		})
 	}()
